@@ -1,9 +1,9 @@
 # Windows Driver Adapter DLLs
 
-Die Binärdateien `GoodixMocSensorAdapter.dll` und `GoodixMocStorageAdapter.dll` sind proprietäre Goodix/OEM-Treiberkomponenten und werden **aus Urheberrechtsgründen** nicht in diesem öffentlichen Repository bereitgestellt.
+The binaries `GoodixMocSensorAdapter.dll` and `GoodixMocStorageAdapter.dll` are proprietary Goodix/OEM driver components and are **NOT** provided in this public repository for **copyright reasons**.
 
-## So erhältst du die DLLs für eigene Analysen:
-1. Lade das offizielle Treiberelement für den Goodix GF3268 (USB ID `27c6:6f94`) herunter.
-2. Entpacke den Treiber (z. B. mit `7z` oder Windows Device Manager / Driver Cabinet).
-3. Entnimm `GoodixMocSensorAdapter.dll` und `GoodixMocStorageAdapter.dll`.
-4. Verwende Ghidra, IDA Pro oder `objdump -d` wie in `HANDOVER_COWORK.md` beschrieben.
+## How to obtain the DLLs for your own analysis:
+1. Download the official Windows driver package for the Goodix GF3268 (USB ID `27c6:6f94`).
+2. Extract the driver package (e.g., using `7z` or Windows Device Manager / Driver Cabinet).
+3. Extract `GoodixMocSensorAdapter.dll` and `GoodixMocStorageAdapter.dll`.
+4. Use Ghidra, IDA Pro or `objdump -d` as described in `HANDOVER_COWORK.md`.
