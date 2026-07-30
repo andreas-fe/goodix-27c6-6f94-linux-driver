@@ -97,53 +97,53 @@ The `poll()` timeout of 5s should suffice — but previous tests left USB in EBU
 
 ```
 scratch/libfprint_natasha/libfprint/drivers/goodixtls/
-├── goodix.c           ← Hauptprotokoll, TLS-Handshake-SSM (do_tls_handshake),
-│                         on_goodix_tls_read_handshake (HIER war der double-strip Bug!)
-├── goodix6f94.c       ← GF3268-spezifischer driver, FDT-Payload, dev_change_state_6f94
-├── goodix6f94.h       ← Header mit PSK-Konstanten
-├── goodixtls.c        ← TLS-Infrastruktur; für 6f94: subprocess-basierter Ansatz
-│                         (goodix_tls_6f94_subprocess_thread startet openssl s_client)
-├── goodixtls.h        ← GoodixTlsServer Struct (enthält openssl_pid für 6f94)
-├── goodix5xx.c        ← 5xx-Familien-Code, scan_run_state, calibration
-└── goodix_proto.h     ← Protokoll-Konstanten
+├── goodix.c           ← Main protocol, TLS Handshake SSM (do_tls_handshake),
+│                         on_goodix_tls_read_handshake (HERE was the double-strip bug!)
+├── goodix6f94.c       ← GF3268-specific driver, FDT Payload, dev_change_state_6f94
+├── goodix6f94.h       ← Header with PSK constants
+├── goodixtls.c        ← TLS infrastructure; for 6f94: subprocess-based approach
+│                         (goodix_tls_6f94_subprocess_thread starts openssl s_client)
+├── goodixtls.h        ← GoodixTlsServer Struct (contains openssl_pid for 6f94)
+├── goodix5xx.c        ← 5xx family code, scan_run_state, calibration
+└── goodix_proto.h     ← Protocol constants
 
-scratch/poc_driver_tls.py   ← Python PoC (VOLLSTÄNDIG FUNKTIONSTÜCHTIG)
+scratch/poc_driver_tls.py   ← Python PoC (FULLY FUNCTIONAL)
 ```
 
 ---
 
 ## 5. Critical Code Details
 
-### goodixtls.c — subprocess-Ansatz für 6f94
+### goodixtls.c — subprocess approach for 6f94
 ```c
-// In goodix_tls_server_init() für 6f94:
-// 1. TCP-Listener auf ephemerem Port
-// 2. openssl s_client -connect 127.0.0.1:PORT -psk 000...0 -tls1_2 -quiet spawnen
-// 3. TCP-Verbindung akzeptieren → client_fd
-// 4. goodix_tls_client_read/write nutzen client_fd für TLS-Byte-Austausch
+// In goodix_tls_server_init() for 6f94:
+// 1. TCP listener on ephemeral port
+// 2. spawn openssl s_client -connect 127.0.0.1:PORT -psk 000...0 -tls1_2 -quiet
+// 3. Accept TCP connection → client_fd
+// 4. use goodix_tls_client_read/write with client_fd for TLS byte exchange
 ```
 
 ### goodix.c — Handshake SSM (Stage 0-3)
 ```c
-// Stage 0: goodix_tls_client_read() → ClientHello lesen → e3 02 00 senden
-// Stage 1: e3 00 00 → Sensor liefert ServerHello+Cert (1200B) → client_fd schreiben
-// Stage 2: goodix_tls_client_read() → ClientFinished lesen → e3 02 00 senden
-// Stage 3: e3 00 00 → ServerFinished → client_fd schreiben → handshake done
-// Dann: d4 00 00 senden
+// Stage 0: goodix_tls_client_read() → read ClientHello → send e3 02 00
+// Stage 1: e3 00 00 → Sensor returns ServerHello+Cert (1200B) → write to client_fd
+// Stage 2: goodix_tls_client_read() → read ClientFinished → send e3 02 00
+// Stage 3: e3 00 00 → ServerFinished → write to client_fd → handshake done
+// Then: send d4 00 00
 ```
 
 ### goodix.c — on_goodix_tls_read_handshake
 ```c
-// BUG WAR: double-strip (data+1, length-1) → fixed zu (data, length)
-// goodix_receive_pack strippt Status-Byte bereits für e3 00 00 Responses!
-g_byte_array_append(priv->tls_recv_buffer, data, length);  // KORREKT
+// BUG WAS: double-strip (data+1, length-1) → fixed to (data, length)
+// goodix_receive_pack already strips status byte for e3 00 00 Responses!
+g_byte_array_append(priv->tls_recv_buffer, data, length);  // CORRECT
 ```
 
 ### goodix.c — expected_tls_length
 ```c
-// Stage 1 Reset wurde entfernt — expected_tls_length kommt vom Stage-0 e3 02 00 Response
-// = 847 bytes (ServerHello+Cert+Done laut Sensor)
-// ABER: Sensor liefert 1200 Bytes in einem Chunk! Da 1200 >= 847 → sofort komplett ✓
+// Stage 1 Reset was removed — expected_tls_length comes from Stage-0 e3 02 00 Response
+// = 847 bytes (ServerHello+Cert+Done according to sensor)
+// BUT: Sensor returns 1200 Bytes in one chunk! Since 1200 >= 847 → immediately complete ✓
 ```
 
 ---
@@ -155,10 +155,10 @@ g_byte_array_append(priv->tls_recv_buffer, data, length);  // KORREKT
 cd /home/andreas/Projekte/Fingerprint/scratch/libfprint_natasha
 ninja -C build
 
-# Testen (USB-Device muss frei sein!):
+# Testing (USB-Device must be free!):
 echo "5" | G_MESSAGES_DEBUG=all ./build/examples/enroll 2>&1
 
-# USB-Device reset falls EBUSY:
+# USB-Device reset if EBUSY:
 python3 -c "
 import fcntl, subprocess
 USBDEVFS_RESET = 0x5514
@@ -172,7 +172,7 @@ for line in r.stdout.splitlines():
 "
 sleep 3
 
-# Python PoC (immer funktionstüchtig):
+# Python PoC (always functional):
 cd /home/andreas/Projekte/Fingerprint
 python3 scratch/poc_driver_tls.py
 ```
@@ -183,10 +183,10 @@ python3 scratch/poc_driver_tls.py
 
 ### IMMEDIATE: Debug Handshake Stage 2+3
 This is the critical next step. Execute driver and check debug logs for:
-1. `TLS_HANDSHAKE_STAGE_NUM entering state 2` erscheint
-2. `TLS handshake stage 2: sending ClientFinished` erscheint
-3. `TLS handshake stage 3: reading ServerFinished` erscheint  
-4. `HANDSHAKE DONE` erscheint
+1. `TLS_HANDSHAKE_STAGE_NUM entering state 2` appears
+2. `TLS handshake stage 2: sending ClientFinished` appears
+3. `TLS handshake stage 3: reading ServerFinished` appears  
+4. `HANDSHAKE DONE` appears
 
 If Stage 2 blocks: OpenSSL subprocess received 1200 bytes ServerHello,
 but must finish TLS processing first. Increase `poll()` timeout or
@@ -194,14 +194,14 @@ implement a non-blocking read retry loop.
 
 ### Afterwards: Image & Token Decoding
 Following successful handshake comes the next milestone:
-- `a5 00 00` Key-Payload (32 Bytes, kommt aus goodix6f94.h)
-- FDT-Mode + Finger-Touch-Erkennung
-- MCU_GET_IMAGE + Bilddaten via e3 00 00
+- `a5 00 00` Key-Payload (32 Bytes, comes from goodix6f94.h)
+- FDT-Mode + Finger Touch Recognition
+- MCU_GET_IMAGE + Image data via e3 00 00
 
 Since GF3268 is Match-on-Chip (MoC), data may NOT require `SSL_read`
 decryption — it arrives pre-processed directly from sensor via e3 00 00.
 
-### Referenz: Python PoC
+### Reference: Python PoC
 The Python PoC `scratch/poc_driver_tls.py` is the baseline reference.
 Every step in the C driver must strictly match the PoC.
 
@@ -209,20 +209,20 @@ Every step in the C driver must strictly match the PoC.
 
 ## 8. Open Questions & Uncertainties
 
-1. **Bilddaten-Encryption:** Werden die Bilddaten nach dem TLS-Handshake noch via
-   SSL-Encryption übertragen? Wenn ja, müssen wir über den openssl subprocess lesen.
+1. **Image data encryption:** Are the image data still transmitted via
+   SSL encryption after the TLS handshake? If so, we must read via the openssl subprocess.
    
-2. **a5 00 00 Key-Payload:** Der Python PoC sendet einen fixen 32-Byte-Wert. Im C-driver
-   ist der Key-Payload in goodix6f94.h definiert — muss mit dem PoC-Wert übereinstimmen.
+2. **a5 00 00 Key-Payload:** The Python PoC sends a fixed 32-byte value. In the C-driver
+   the Key-Payload is defined in goodix6f94.h — must match the PoC value.
    
-3. **expected_tls_length:** Warum sagt der Sensor 847 Bytes aber liefert 1200? Möglicherweise
-   ist `expected_tls_length` die Length des ServerHello ohne Certificate-Extension.
+3. **expected_tls_length:** Why does the sensor say 847 bytes but returns 1200? Possibly
+   `expected_tls_length` is the length of the ServerHello without Certificate extension.
 
 ---
 
 ## 9. Reference Logs
 
-### Erfolgreicher TLS Stage 0+1 (aus dem heutigen Test)
+### Successful TLS Stage 0+1 (from today's test)
 ```
 6f94 TLS: TCP listener on port 39425, launching openssl s_client
 6f94 TLS: openssl s_client spawned (pid 43464), waiting for connection
@@ -236,10 +236,10 @@ TLS handshake stage 1: reading ServerHello from sensor (passing to OpenSSL)
 TLS chunk received: 1201 bytes, total accumulated: 1201 / 847
 TLS server flight complete (1201 bytes), passing to OpenSSL
 TLS_HANDSHAKE_STAGE_NUM entering state 2
-...hier blieb der Test hängen (USB EBUSY vom vorherigen Run)
+...here the test hung (USB EBUSY from previous run)
 ```
 
-### Python PoC TLS (complete erfolgreich)
+### Python PoC TLS (completely successful)
 ```
 [Proxy] Read Client Hello from openssl (241B)
 [Proxy] Device responded to Client Hello: status=0, expected response length=847
@@ -265,84 +265,84 @@ OpenSSL aborted with 'wrong version number', terminating `s_client` subprocess,
 causing Stage 2 to hang in `poll()` until timeout.
 **This was the exact cause of the Stage 2 deadlock.**
 
-### Was geändert wurde
+### What was changed
 
 **`goodixtls.c` / `goodixtls.h`**
 
-| Neu | Zweck |
+| New | Purpose |
 |---|---|
-| `goodix_tls_scan_records()` | Läuft einen Puffer als Folge von TLS-Records ab. Liefert die Length der *vollständigen* Records und reassembliert den Handshake-Stream über Record-Limitations hinweg (das Certificate des Sensors ist gesplittet). Meldet CCS, Alerts, letzten Handshake-Typ. |
-| `goodix_tls_client_read_flight()` | Liest einen **kompletten Flight** vom `openssl s_client`, nicht nur was ein einzelnes `read()` liefert. Drain-Loop bis ClientKeyExchange+CCS+Finished da sind. Erkennt EOF (Subprozess tot) und TLS-Alerts mit klarer Fehlermeldung statt stiller Blockade. |
-| `goodix_tls_client_write()` | Schreibt jetzt in einer Schleife (Short-Writes hätten den Flight abgeschnitten). |
+| `goodix_tls_scan_records()` | Iterates over a buffer as a sequence of TLS records. Returns the length of the *complete* records and reassembles the handshake stream across record limitations (the sensor's certificate is split). Reports CCS, Alerts, last Handshake Type. |
+| `goodix_tls_client_read_flight()` | Reads a **complete flight** from `openssl s_client`, not just what a single `read()` returns. Drain-Loop until ClientKeyExchange+CCS+Finished are there. Detects EOF (subprocess dead) and TLS alerts with clear error message instead of silent blockage. |
+| `goodix_tls_client_write()` | Now writes in a loop (short writes would have cut off the flight). |
 
 **`goodix.c`**
-- `on_goodix_tls_read_handshake()`: Vollständigkeit wird an den TLS-Records
-  entschieden (ServerHelloDone bzw. CCS+Finished), nicht mehr an
-  `expected_tls_length`. Trailing-Padding wird abgeschnitten, jeder Record wird
-  geloggt, TLS-Alerts brechen die SSM mit Klartextfehler ab.
-- Stage 0 und Stage 2 nutzen `goodix_tls_client_read_flight()`. Der alte
-  Stage-2-Fallback „bei Lesefehler leeren Payload senden" ist entfernt — er hat
-  den Error verschleiert.
-- `goodix_receive_pack()` (6f94): mehrere Gerätepakete in *einem* USB-Transfer
-  werden jetzt alle verarbeitet; der Rest wird nicht mehr verworfen.
-- Neuer optionaler Class-Hook `finger_down` (`FpiDeviceGoodixTlsClass`).
-- `goodix_tls_init()` / `goodix_tls_ready()`: melden Init-Error jetzt über den
-  Callback, statt die Aktivierung ewig hängen zu lassen.
+- `on_goodix_tls_read_handshake()`: Completeness is decided by the TLS records
+  (ServerHelloDone or CCS+Finished), no longer by
+  `expected_tls_length`. Trailing padding is stripped off, each record is
+  logged, TLS alerts abort the SSM with a plaintext error.
+- Stage 0 and Stage 2 use `goodix_tls_client_read_flight()`. The old
+  Stage-2 fallback "send empty payload on read error" was removed — it
+  masked the error.
+- `goodix_receive_pack()` (6f94): multiple device packets in *one* USB transfer
+  are now all processed; the rest is no longer discarded.
+- New optional class hook `finger_down` (`FpiDeviceGoodixTlsClass`).
+- `goodix_tls_init()` / `goodix_tls_ready()`: now report init error via the
+  callback, instead of letting activation hang indefinitely.
 
 **`goodix6f94.c`**
-- **Post-TLS-SSM ergänzt** (fehlte komplett!): nach `d4 00 00` werden jetzt
-  `a5 00 00` (32-Byte-Key aus Frame 466) und `08 01 00` (SdcpMacEnroll,
-  32 Null-Bytes) gesendet — exact wie im PoC. Erst danach
+- **Post-TLS SSM added** (was missing completely!): after `d4 00 00` now
+  `a5 00 00` (32-byte key from frame 466) and `08 01 00` (SdcpMacEnroll,
+  32 null bytes) are sent — exactly as in the PoC. Only then
   `fpi_image_device_activate_complete()`.
-- **`dev_change_state_6f94()` Bug behoben:** `36 00 00` und `a2 00 00` wurden
-  direkt hintereinander abgesetzt. `goodix_send_protocol()` verweigert aber ein
-  zweites Kommando, solange das erste läuft („A command is already running") —
-  das `a2` wurde also **stillschweigend verworfen** und der Sensor hat die
-  Fingererkennung nie scharfgeschaltet. Jetzt verkettet: `36` → Callback → `a2`
+- **`dev_change_state_6f94()` bug fixed:** `36 00 00` and `a2 00 00` were
+  issued right after another. But `goodix_send_protocol()` rejects a
+  second command while the first is running ("A command is already running") —
+  thus `a2` was **silently discarded** and the sensor never armed
+  finger detection. Now chained: `36` → callback → `a2`
   → `waiting_for_finger = TRUE`.
-- `finger_down_6f94()`: statt der 5xx-Capture-SSM (passt für MOC nicht) wird wie
-  im PoC `20 00 00` (MCU_GET_IMAGE) gesendet und die Response ausgewertet.
+- `finger_down_6f94()`: instead of the 5xx capture SSM (doesn't fit MOC)
+  `20 00 00` (MCU_GET_IMAGE) is sent just like in the PoC and response evaluated.
 
 **`goodix_proto.h`** — `GOODIX_CMD_SDCP_MAC_ENROLL (0x08)`,
-`GOODIX_CMD_SDCP_KEY (0xa5)`; Mapping `0x08 → 08 01 00` in `goodix_send_protocol()`.
+`GOODIX_CMD_SDCP_KEY (0xa5)`; mapping `0x08 → 08 01 00` in `goodix_send_protocol()`.
 
-### Verifikation
-- Alle drei Dateien kompilieren warnungsfrei unter dem vollen Meson-Warnungsset.
-- `goodix_tls_scan_records()` ist mit 30 Assertions gegen physical/real Daten tested:
-  den 241-Byte `sclient_hello.bin`, einen Server-Flight mit über Records
-  gesplittetem 847-Byte-Certificate, denselben Flight mit USB-Padding (wird
-  korrekt abgeschnitten), Teilflights, CKE-ohne-Finished, Alert-Records und den
-  bekannten Non-TLS-Blob `0x9c…`.
-- **Nicht** gegen die physical/real Hardware tested — das muss auf dem Gerät laufen.
+### Verification
+- All three files compile without warnings under the full Meson warning set.
+- `goodix_tls_scan_records()` is tested with 30 assertions against physical/real data:
+  the 241-byte `sclient_hello.bin`, a server flight with the 847-byte certificate
+  split across records, the same flight with USB padding (is
+  correctly stripped), partial flights, CKE-without-Finished, alert records and the
+  known non-TLS blob `0x9c…`.
+- **Not** tested against the physical/real hardware — this must run on the device.
 
 ### Test
 ```bash
 cd /home/andreas/Projekte/Fingerprint
-sudo ./run_enroll_test.sh        # baut, resettet USB, enrollt, wertet Log aus
+sudo ./run_enroll_test.sh        # builds, resets USB, enrolls, evaluates log
 ```
 
-### Worauf im Log zu achten ist
+### What to look for in the log
 1. `TLS handshake stage 0: sending ClientHello (241 bytes)`
 2. `server record: type=22 … first_byte=0x02 / 0x0b / 0x0c / 0x0e` —
-   ServerHello, Certificate, ServerKeyExchange, ServerHelloDone. Fehlt `0x0e`,
-   fordert der driver automatisch den nächsten Chunk an.
-3. `client flight: … ccs=1 after_ccs=1` — der ClientFinished-Flight ist komplett.
+   ServerHello, Certificate, ServerKeyExchange, ServerHelloDone. If `0x0e` is missing,
+   the driver automatically requests the next chunk.
+3. `client flight: … ccs=1 after_ccs=1` — the ClientFinished flight is complete.
 4. `TLS handshake stage 3` → `HANDSHAKE DONE`
 5. `post-TLS: sending a5 00 00` → `post-TLS: sending 08 01 00`
-6. `Finger detection armed` → Finger auflegen → `finger down`
+6. `Finger detection armed` → place finger → `finger down`
 
-Bleibt es bei Stage 2 stehen, steht jetzt der Grund im Log: entweder
-`openssl s_client closed the connection` (OpenSSL hat den Server-Flight
-verworfen — dann die `server record:`-Zeilen prüfen) oder
+If it hangs at Stage 2, the reason is now in the log: either
+`openssl s_client closed the connection` (OpenSSL discarded the server flight
+— then check the `server record:` lines) or
 `timed out … waiting for TLS data`.
 
-### Noch offen (superseded durch Section 11 — bitte dort weiterlesen)
-- `GOODIX6F94_WIDTH/HEIGHT` (88×108) sind weiterhin estimated/guessed. `get_image_cb()`
-  loggt die tatsächliche Payload-Größe von `20 00 00` — daraus lassen sich die
-  physical/real Maße ableiten.
-- Ob die Bilddaten nach dem Handshake noch TLS-verschlüsselt sind, ist unresolved.
-  Falls `20 00 00` verschlüsselt zurückkommt, muss die Response durch den
-  `s_client`-Subprozess gelesen werden (bisher nicht implementiert).
+### Still open (superseded by Section 11 — please read further there)
+- `GOODIX6F94_WIDTH/HEIGHT` (88×108) are still estimated/guessed. `get_image_cb()`
+  logs the actual payload size of `20 00 00` — from this the
+  physical/real dimensions can be derived.
+- Whether the image data is still TLS encrypted after the handshake is unresolved.
+  If `20 00 00` comes back encrypted, the response must be read through the
+  `s_client` subprocess (not yet implemented).
 
 ---
 
@@ -362,8 +362,8 @@ Payload following status byte = 1201 bytes, structure:
 ```
 
 Scanning all 1201 bytes for valid TLS record headers
-(Type 20/21/22/23 followed by `03 0x`) yields **zero hits**. Das ist auch die
-Auflösung des „847"-Rätsels: der Sensor meldet in der `e3 02 00` Response die
+(Type 20/21/22/23 followed by `03 0x`) yields **zero hits**. That is also the
+resolution of the "847" mystery: the sensor reports in the `e3 02 00` response the
 **Certificate** in `e3 02 00` response, not a TLS flight.
 
 ### Proof 2 — Windows driver never sends a ClientHello
@@ -388,129 +388,128 @@ the sensor does not parse it and responds with a generic blob containing
 the certificate.
 
 ### Why the Python PoC Appeared 'Successful'
-`run_tls_handshake()` in `scratch/poc_driver_tls.py` validated **nothing**. Es
-schiebt Bytes zwischen Socket und USB hin und her und druckt danach
-unconditionally `[Proxy] TLS Handshake proxy complete!`. Wenn OpenSSL den Blob
-verwirft und einen 7-Byte-Alert zurückschickt, wird auch der brav als
-as a 'Client Finished flight' to the sensor. Die Aussage
-„TLS-Handshake 100 % verifiziert" im Section 2 ist damit **nicht belegt** —
-die Fingerberührungserkennung funktioniert offenbar auch ohne gesicherten
-Kanal. Counter-check in 10 Sekunden: `openssl s_client` von Hand starten und
-seine stderr ansehen; dort müsste „wrong version number" stehen.
+`run_tls_handshake()` in `scratch/poc_driver_tls.py` validated **nothing**. It
+pushes bytes back and forth between socket and USB and then unconditionally prints
+`[Proxy] TLS Handshake proxy complete!`. If OpenSSL rejects the blob
+and sends a 7-byte alert back, that is also obediently passed
+as a 'Client Finished flight' to the sensor. The statement
+"TLS handshake 100% verified" in Section 2 is thus **not supported** —
+the finger touch detection apparently also works without a secured
+channel. Counter-check in 10 seconds: start `openssl s_client` manually and
+look at its stderr; it should say "wrong version number" there.
 
 ### Analysis & Protocol Classification
-Der driver referenziert bereits `GoodixSdcpMacEnroll` (08 01 00) und
-`GoodixSdcpVerify` (20 01 00). **SDCP = Microsofts Secure Device Connection
-Protocol** für Windows-Hello-Sensoren. Nonce + Gerätezertifikat + EC-Punkt +
-Signatur in der Response passen genau auf einen SDCP-`Connect`. Der GF3268 nutzt
-also nicht das TLS-PSK der älteren Goodix-Generation (55a2, worauf der
-`goodix-fingerprint-reversing`-Code im Projekt basiert), sondern SDCP.
+The driver already references `GoodixSdcpMacEnroll` (08 01 00) and
+`GoodixSdcpVerify` (20 01 00). **SDCP = Microsoft's Secure Device Connection
+Protocol** for Windows Hello sensors. Nonce + device certificate + EC point +
+signature in the response perfectly match an SDCP `Connect`. The GF3268 thus uses
+not the TLS-PSK of the older Goodix generation (55a2, which the
+`goodix-fingerprint-reversing` code in the project is based on), but SDCP.
 
-### Ebenfalls in diesem Run gefunden und behoben
-- **Regression aus Section 10:** Der Sensor padded jedes Paket auf ein
-  Vielfaches von 64 Byte. Mein „Rest im Puffer behalten"-Patch hat dieses
-  Padding als weiteres Paket geparst → Lengthnfeld 0 → Puffer dauerhaft
-  desynchronisiert → der 1214-Byte-Chunk wurde nie zusammengesetzt → Hang/Freeze.
-  Jetzt wird der Header per CRC8 validiert, bevor er benutzt wird; schlägt das
-  fehl, wird der Puffer verworfen und resynchronisiert. Gegen die Bytes des
-  Fehllaufs simuliert: 7/7 Pakete sauber, kein Rest.
-- `pay_len_field < 4` löste einen Underflow in `payload_len` aus →
-  `g_memdup()` mit 65532 Bytes aus einem 72-Byte-Puffer (Heap-Overread).
-- `data_to_str()` gab bei `length == 0` uninitialisierten Speicher zurück —
-  daher die Müllzeichen `\xed\xdd>36V` im Log bei Zero-Length-Transfers.
+### Also found and fixed in this run
+- **Regression from Section 10:** The sensor pads every packet to a
+  multiple of 64 bytes. My "keep rest in buffer" patch parsed this
+  padding as another packet → length field 0 → buffer permanently
+  desynchronized → the 1214-byte chunk was never assembled → hang/freeze.
+  Now the header is validated via CRC8 before it is used; if that
+  fails, the buffer is discarded and resynchronized. Simulated against the bytes of the
+  failed run: 7/7 packets clean, no remainder.
+- `pay_len_field < 4` triggered an underflow in `payload_len` →
+  `g_memdup()` with 65532 bytes from a 72-byte buffer (heap overread).
+- `data_to_str()` returned uninitialized memory when `length == 0` —
+  hence the garbage characters `\xed\xdd>36V` in the log on zero-length transfers.
 
-### Empfohlene nächste Steps
-1. **Billiges Experiment zuerst:** die exact Byte-Sequenz aus
-   `unlock_success_flow.txt` (Frames 45/57) 1:1 an den Sensor replayen. Wenn er
-   mit einer plausiblen Response kommt, gibt es keine Freshness-Prüfung auf der
-   Nonce und die Struktur lässt sich schrittweise aufklären.
-2. Erst danach das Framing `[Nonce][01 ff][Length][Body]` nachbauen und den
-   `openssl s_client`-Subprozess ersatzlos entfernen.
-3. Die restlichen `e3`-Frames aus allen vorhandenen pcapng-Dateien extrahieren,
-   um Body-Layout und Trailer (30/30/26/32 Byte — noch nicht verstanden) zu
-   bestimmen.
+### Recommended next steps
+1. **Cheap experiment first:** replay the exact byte sequence from
+   `unlock_success_flow.txt` (frames 45/57) 1:1 to the sensor. If it
+   comes up with a plausible response, there is no freshness check on the
+   nonce and the structure can be clarified step by step.
+2. Only then rebuild the framing `[Nonce][01 ff][Length][Body]` and remove the
+   `openssl s_client` subprocess entirely.
+3. Extract the remaining `e3` frames from all available pcapng files
+   to determine the body layout and trailer (30/30/26/32 bytes — not yet understood).
 
 ---
 
-## 12. Vollstaendiger Windows-Flow/Sequence (aus `unlock_success_flow.txt`, alle 40 Frames CRC-verifiziert)
+## 12. Complete Windows Flow/Sequence (from `unlock_success_flow.txt`, all 40 frames CRC verified)
 
-Der tatsaechliche Unlock-Flow/Sequence des Windows-Treibers. **Er enthaelt weder
-`d4 00 00` noch `36 00 00` noch `08 01 00` noch `20 00 00`** — die Sequenz in
-Section 2 ist damit ebenfalls hinfaellig.
+The actual unlock flow/sequence of the Windows driver. **It contains neither
+`d4 00 00` nor `36 00 00` nor `08 01 00` nor `20 00 00`** — the sequence in
+Section 2 is thus also obsolete.
 
 | # | Host → Sensor | Payload | Sensor → Host |
 |---|---|---|---|
 | 33  | `e1 04 00` | `00` | `00000000` |
 | 45  | `e3 02 00` | 256 B (`len=230` + Nonce + Body) | `00 4f030000` → Status 0, 847 |
-| 57  | `e3 00 00` | 256 B (gleicher Body, **neue Nonce**) | 1431 B |
-| 69  | `b0 02 00` | `00` | 65 B (sieht nach Kalibrierwerten aus) |
+| 57  | `e3 00 00` | 256 B (same body, **new nonce**) | 1431 B |
+| 69  | `b0 02 00` | `00` | 65 B (looks like calibration values) |
 | 81  | `e0 01 00` | `00` | `00000093` |
 | 93  | `a2 00 00` | `01 00 23 01` | `005c64001f003b00` |
 | 105 | `a5 00 00` | 32 B Key | **1110 B** |
 | 117 | `e0 00 00` | `00` | `00000000` |
 | 129 | `a5 01 00` | `01 00 00 00` | `00` |
 | 141 | `e3 02 00` | 256 B (`len=102`) | `00 4f030000` |
-| 153 | `e3 01 00` | 256 B (gleicher Body) | 33 B (Status + 32 B, vermutlich MAC) |
+| 153 | `e3 01 00` | 256 B (same body) | 33 B (Status + 32 B, probably MAC) |
 | 165 | `b0 02 00` | `00` | 65 B |
-| 177 | `a2 00 00` | `01 00 23 00` | nur ACK |
-| 185 | `b3 02 00` | `00` | nur ACK |
+| 177 | `a2 00 00` | `01 00 23 00` | only ACK |
+| 185 | `b3 02 00` | `00` | only ACK |
 
 Observations:
-- `e3 02 00` **schreibt**, `e3 00 00` / `e3 01 00` **lesen** — jeweils mit
-  demselben Body, aber jedes Mal einer fresh/dynamicen 32-Byte-Nonce.
-- Der Sensor meldet auf jedes `e3 02 00` dieselbe Laenge 847 (Certificate).
-- `a5 00 00` mit 32-Byte-Key liefert 1110 B zurueck — das ist der interessante
-  Kandidat fuer Template-/Bilddaten.
-- `b0 02 00` und `b3 02 00` sind im aktuellen driver ueberhaupt nicht bekannt.
+- `e3 02 00` **writes**, `e3 00 00` / `e3 01 00` **reads** — each with
+  the same body, but each time a fresh/dynamic 32-byte nonce.
+- The sensor reports on every `e3 02 00` the same length 847 (Certificate).
+- `a5 00 00` with 32-byte key returns 1110 B — that is the interesting
+  candidate for template/image data.
+- `b0 02 00` and `b3 02 00` are completely unknown in the current driver.
 
-### Neue Tools
-- **`scratch/sdcp_replay.py`** — spielt diese Host-Frames byte-identisch ein und
-  vergleicht jede Response mit dem Mitschnitt. Meldet praezise, ab welchem Frame
-  der Sensor abweicht (= wo Nonce-Frische/Schluesselableitung noetig wird).
+### New Tools
+- **`scratch/sdcp_replay.py`** — injects these host frames byte-identically and
+  compares every response with the capture. Reports precisely from which frame on
+  the sensor diverges (= where nonce freshness/key derivation becomes necessary).
   ```bash
-  python3 scratch/sdcp_replay.py --dry-run     # ohne Hardware, prueft nur den Mitschnitt
-  sudo python3 scratch/sdcp_replay.py          # echter Replay
+  python3 scratch/sdcp_replay.py --dry-run     # without hardware, checks only the capture
+  sudo python3 scratch/sdcp_replay.py          # real replay
   sudo python3 scratch/sdcp_replay.py --until 65
   ```
-- **`scratch/poc_driver_tls.py`** meldet jetzt nicht mehr bedingungslos Erfolg:
-  jeder Flight wird als TLS-Record geparst, OpenSSLs stderr wird ausgelesen und
-  am Ende steht ein ehrliches Fazit. Gegen die physical/real Sensor-Bytes tested:
-  „KEIN gueltiger TLS-Record".
+- **`scratch/poc_driver_tls.py`** now no longer reports unconditional success:
+  every flight is parsed as a TLS record, OpenSSL's stderr is read and
+  at the end there is an honest conclusion. Tested against the physical/real sensor bytes:
+  "NO valid TLS record".
 
 ---
 
-## 13. Replay-Result (Hardware, 2026-07-28): **Der Sensor nimmt den Replay an**
+## 13. Replay Result (Hardware, 2026-07-28): **The sensor accepts the replay**
 
-`sudo python3 scratch/sdcp_replay.py --until 65` gegen den physical/real Sensor.
-Die erste Fassung des Skripts hat das Result falsch zusammengefasst („weicht
-ab Frame 33 ab") — sie hat rein byteweise verglichen. Fachlich gelesen:
+`sudo python3 scratch/sdcp_replay.py --until 65` against the physical/real sensor.
+The first version of the script summarized the result incorrectly ("diverges
+from frame 33") — it compared purely byte by byte. Read technically:
 
 | Frame | Result | Evaluation |
 |---|---|---|
-| 33 `e1 04 00` | Response `00000000` **byte-identisch** | ✅ |
-| 45 `e3 02 00` | Response `00 4f030000` **byte-identisch** | ✅ Sensor akzeptiert den replayten Nonce+Body |
-| 57 `e3 00 00` | 1431 B, **gleiche Length**, `01 ff`-Marker gleich, deklarierte Body-Length **1366 identisch**, Body-Anfang identisch | ✅ strukturell identisch |
-| 69 `b0 02 00` | 65 B, 24 B abweichend | ✅ das sind 16-Bit-**Live-Messwerte** des Sensors |
-| alle ACKs | 1 Byte abweichend, immer Offset 3 (`…00` statt `…01`) | ✅ Flagbyte, kein Nutzinhalt |
+| 33 `e1 04 00` | Response `00000000` **byte-identical** | ✅ |
+| 45 `e3 02 00` | Response `00 4f030000` **byte-identical** | ✅ Sensor accepts the replayed nonce+body |
+| 57 `e3 00 00` | 1431 B, **same length**, `01 ff` marker equal, declared body length **1366 identical**, body start identical | ✅ structurally identical |
+| 69 `b0 02 00` | 65 B, 24 B diverge | ✅ these are 16-bit **live measurements** of the sensor |
+| all ACKs | 1 byte diverges, always offset 3 (`…00` instead of `…01`) | ✅ flag byte, no payload |
 
-**Es gibt keine Nonce-Freshness-Prüfung, die den Replay ablehnt.** Von den
-1431 Byte der Frame-57-Response sind 937 identisch; die 494 abweichenden sind
-die fresh/dynamice 32-Byte-Geräte-Nonce, der 26-Byte-Trailer und ~436 Byte im Body.
+**There is no nonce freshness check that rejects the replay.** Of the
+1431 bytes of the frame 57 response, 937 are identical; the 494 diverging ones are
+the fresh/dynamic 32-byte device nonce, the 26-byte trailer and ~436 bytes in the body.
 
-### Der Body ist verschlüsselt
-Blockweise Byte-Entropie des 1366-Byte-Bodys aus dem Windows-Mitschnitt liegt
-durchgehend bei ~0,88–1,00 (zufällig). Weder das Certificate noch irgendeine
-DER-Struktur ist darin zu finden. Zum Vergleich: unsere ClientHello-Response aus
-Section 11 hat Blöcke mit 0,41–0,64 — dort lag das Certificate im Klartext.
+### The body is encrypted
+Block-wise byte entropy of the 1366-byte body from the Windows capture lies
+consistently at ~0.88–1.00 (random). Neither the certificate nor any
+DER structure can be found in it. For comparison: our ClientHello response from
+Section 11 has blocks with 0.41–0.64 — there the certificate lay in plaintext.
 
-Daraus folgt die Working hypothesis: der Sensor liefert seine SDCP-Identität
-**verschlüsselt**, wenn die Anfrage wohlgeformt ist, und fällt bei einer
-unverständlichen Anfrage (unser ClientHello) auf eine Klartext-Response mit dem
-Certificate zurück.
+From this follows the working hypothesis: the sensor delivers its SDCP identity
+**encrypted**, if the request is well-formed, and falls back on an
+incomprehensible request (our ClientHello) to a plaintext response with the
+certificate.
 
-### Nächster Step: Felder kartieren ohne Kryptoanalyse
-Zwei Runs **derselben** Anfrage gegeneinander diffen. Was sich ändert, ist
-fresh/dynamicer Zufall des Sensors; was gleich bleibt, sind statice Gerätedaten:
+### Next Step: map fields without cryptanalysis
+Diff two runs of the **same** request against each other. What changes is
+fresh/dynamic randomness of the sensor; what remains equal are static device data:
 
 ```bash
 sudo python3 scratch/sdcp_replay.py --until 65      # Run 1
@@ -518,245 +517,243 @@ sudo python3 scratch/sdcp_replay.py --until 65      # Run 2
 python3 scratch/sdcp_replay.py --diff scratch/replay_out/run_A scratch/replay_out/run_B
 ```
 
-Das Skript speichert jetzt jede Response unter `scratch/replay_out/run_<zeit>/`
-und `--diff` gibt eine Offset-Karte „static vs. fresh/dynamic" aus. Damit steht das
-Body-Layout fixed, bevor auch nur ein Byte Krypto verstanden sein muss.
+The script now saves every response under `scratch/replay_out/run_<time>/`
+and `--diff` outputs an offset map "static vs. fresh/dynamic". With this the
+body layout is fixed before a single byte of crypto has to be understood.
 
-### Weitere Observation
-`b0 02 00` liefert 32 × 16-Bit-Werte (Status + 64 B). Werte um 0x0076–0x009b
-bei uns, 0x0062–0x0095 bei Windows. Das ist der erste direkte Sensormesswert,
-den wir sehen — Kandidat für die Kalibrierung und damit später für die
-Bildgeometrie.
+### Further observation
+`b0 02 00` returns 32 × 16-bit values (status + 64 B). Values around 0x0076–0x009b
+with us, 0x0062–0x0095 with Windows. This is the first direct sensor measurement
+that we see — candidate for the calibration and thus later for the
+image geometry.
 
 ---
 
-## 14. Feldkarte der `e3 00 00` Response (aus zwei Replay-Läufen, 2026-07-28)
+## 14. Field map of the `e3 00 00` response (from two replay runs, 2026-07-28)
 
-Zwei Runs mit **byte-identischer** Anfrage, Sekunden Abstand. Was sich
-unterscheidet, ist fresh/dynamicer Zufall des Sensors; was gleich bleibt, sind
-statice Gerätedaten. Result für die 1431-Byte-Response:
+Two runs with **byte-identical** request, seconds apart. What
+differs is fresh/dynamic randomness of the sensor; what remains equal are
+static device data. Result for the 1431-byte response:
 
 ```
-  Offset      Größe   Art        Interpretation
+  Offset      Size    Type       Interpretation
   ----------------------------------------------------------------
-       0        1 B   static   Status (0x00)
-    1.. 32     32 B   FRISCH     Nonce des Geräts
-   33.. 34      2 B   static   Marker 01 ff
-   35.. 38      4 B   static   deklarierte Body-Length (1366)
-   39..1318   1280 B  static   Body[0..1279] — Geräteidentität
- 1319..1430    112 B  FRISCH     Body[1280..] + Rest, zusammenhängend
+       0        1 B   static     Status (0x00)
+    1.. 32     32 B   FRESH      Nonce of the device
+   33.. 34      2 B   static     Marker 01 ff
+   35.. 38      4 B   static     declared body length (1366)
+   39..1318   1280 B  static     Body[0..1279] — device identity
+ 1319..1430    112 B  FRESH      Body[1280..] + remainder, contiguous
 ```
 
-**1287 von 1431 Byte sind über Runs hinweg bit-identisch.** Frisch sind nur
-die 32-Byte-Nonce am Anfang und ein zusammenhängender 112-Byte-Schwanz am Ende.
+**1287 out of 1431 bytes are bit-identical across runs.** Fresh are only
+the 32-byte nonce at the beginning and a contiguous 112-byte tail at the end.
 
-### Korrektur zu Section 13
-Die dortige Aussage „der Body ist verschlüsselt" war voreilig. Hohe Entropie
-**plus** Bit-Gleichheit über mehrere Responseen heißt: es ist statices
-hochentropes Material (Key, Hashes, ein fixed verpackter Identitäts-Blob),
-**keine fresh/dynamice Encryption pro Session**. Sonst müsste sich alles ändern.
+### Correction to Section 13
+The statement there "the body is encrypted" was premature. High entropy
+**plus** bit equality over multiple responses means: it is static
+highly entropic material (key, hashes, a fixed wrapped identity blob),
+**not fresh/dynamic encryption per session**. Otherwise everything would have to change.
 
-### Drei Geltungsbereiche
-Der Vergleich Run ↔ Windows-Mitschnitt (völlig andere Session) zeigt eine
-feinere Staffelung:
-
-| Bereich (innerer Puffer) | Größe | Verhalten |
+### Three scopes
+The comparison run ↔ Windows capture (completely different session) shows a
+| Region (inner buffer) | Size | Behavior |
 |---|---|---|
-| `inner[0..31]` | 32 B | ändert sich **bei jeder Response** → Nonce |
-| `inner[32..965]` | 934 B | gleich **auch gegenüber Windows** → constant per device (Certificate/Key) |
-| `inner[966..1317]` | 352 B | gleich innerhalb unserer Runs, ≠ Windows → **sitzungs-/reset-gebunden** |
-| `inner[1318..1429]` | 112 B | ändert sich **bei jeder Response** → Signatur/MAC/ephemerer Key |
+| `inner[0..31]` | 32 B | changes **on every response** → Nonce |
+| `inner[32..965]` | 934 B | equal **even compared to Windows** → constant per device (Certificate/Key) |
+| `inner[966..1317]` | 352 B | equal within our runs, ≠ Windows → **session-/reset-bound** |
+| `inner[1318..1429]` | 112 B | changes **on every response** → Signature/MAC/ephemeral Key |
 
-Die 112 Byte sind der interessante Teil. Größenordnung passt z. B. auf
-ECDSA-P-256-Signatur (64 B roh) + 48 B, oder auf einen AES-GCM-verpackten
-32-Byte-Sessionsschlüssel (32+16) + 64 B Signatur. **Noch nicht belegt.**
+The 112 bytes are the interesting part. The magnitude fits e.g.
+ECDSA-P-256-signature (64 B raw) + 48 B, or an AES-GCM wrapped
+32-byte session key (32+16) + 64 B signature. **Not yet proven.**
 
-### Nächstes Experiment
-Der Bereich `inner[966..1317]` ist der Key zur Frage „woran hängt die
-Session?". Ein Run mit USB-Reset dazwischen trennt das:
+### Next Experiment
+The region `inner[966..1317]` is the key to the question "what does the
+session depend on?". A run with a USB reset in between separates this:
 
 ```bash
-sudo python3 scratch/sdcp_replay.py --until 65            # Run ohne Reset
-sudo python3 scratch/sdcp_replay.py --until 65 --reset    # Run mit Reset davor
-python3 scratch/sdcp_replay.py --diff                     # beide neuesten vergleichen
+sudo python3 scratch/sdcp_replay.py --until 65            # Run without reset
+sudo python3 scratch/sdcp_replay.py --until 65 --reset    # Run with reset before
+python3 scratch/sdcp_replay.py --diff                     # compare both newest
 ```
 
-Wächst der fresh/dynamice Bereich nach einem Reset von 112 auf ~464 Byte, ist
-`inner[966..1317]` an den Power-Zyklus gebunden (Boot-Random / ephemerer
-Geräteschlüssel). Bleibt er bei 112, hängt er an etwas anderem — dann kommt als
-nächstes das Variieren einzelner Felder in der Anfrage.
+If the fresh/dynamic region grows from 112 to ~464 bytes after a reset, then
+`inner[966..1317]` is bound to the power cycle (boot random / ephemeral
+device key). If it stays at 112, it depends on something else — then varying
+individual fields in the request comes next.
 
-### Tool-Korrekturen
-- `--diff` **ohne Argumente** nimmt jetzt die beiden neuesten Runs. (Die
-  Platzhalter `run_A`/`run_B` in Section 13 waren als solche nicht erkennbar —
-  entschuldige.)
-- Neu: `--reset` löst vor dem Run `USBDEVFS_RESET` aus.
-- `classify_diff()` kennt jetzt auch die 4-Byte-Statusantworten von `e1 04 00` /
-  `e0 01 00`: dort ist das letzte Byte ein device stateswert (bei uns `0x9b`,
-  im Windows-Mitschnitt `0x00`) und kein Fehlercode. Damit ist auch das
-  Final conclusion des Skripts endlich korrekt.
+### Tool Corrections
+- `--diff` **without arguments** now takes the two newest runs. (The
+  placeholders `run_A`/`run_B` in Section 13 were not recognizable as such —
+  apologies.)
+- New: `--reset` triggers `USBDEVFS_RESET` before the run.
+- `classify_diff()` now also knows the 4-byte status responses of `e1 04 00` /
+  `e0 01 00`: there the last byte is a device state value (for us `0x9b`,
+  in the Windows capture `0x00`) and not an error code. Thus, the
+  final conclusion of the script is also finally correct.
 
 ---
 
-## 15. Reset-Experiment (2026-07-28): der USB-Reset ändert nichts
+## 15. Reset Experiment (2026-07-28): the USB reset changes nothing
 
-Vier Runs: zwei ohne Reset (Sekunden Abstand), einer 6 Minuten später, einer
-direkt nach `USBDEVFS_RESET`. Frischer Anteil der 1431-Byte-`e3 00 00`-Response:
+Four runs: two without reset (seconds apart), one 6 minutes later, one
+directly after `USBDEVFS_RESET`. Fresh portion of the 1431-byte `e3 00 00` response:
 
-| Vergleich | fresh/dynamic |
+| Comparison | fresh/dynamic |
 |---|---|
-| Lauf1 ↔ Lauf2 (kein Reset, Sekunden) | 32 B Nonce + 112 B Schwanz |
-| Lauf2 ↔ Lauf3 (kein Reset, 6 Min) | 32 B Nonce + 112 B Schwanz |
-| Lauf3 ↔ Lauf4 (**mit USB-Reset**) | 32 B Nonce + 112 B Schwanz |
+| Run1 ↔ Run2 (no reset, seconds) | 32 B Nonce + 112 B tail |
+| Run2 ↔ Run3 (no reset, 6 min) | 32 B Nonce + 112 B tail |
+| Run3 ↔ Run4 (**with USB reset**) | 32 B Nonce + 112 B tail |
 
-**Der Reset macht keinen Unterschied.** Damit ist die Hypothese aus Section 14
-widerlegt: `inner[966..1317]` (352 B) ist **nicht** an den Power-/Reset-Zyklus
-gebunden, sondern **gerätepersistent**. Es überlebt Reset und Zeit.
+**The reset makes no difference.** Thus, the hypothesis from Section 14 is
+refuted: `inner[966..1317]` (352 B) is **not** bound to the power/reset cycle,
+but rather **device-persistent**. It survives reset and time.
 
-Warum es sich dann vom Windows-Mitschnitt unterscheidet, ist offen. Die
-naheliegendste Erklärung: persistenter Zustand, der sich seit dem Mitschnitt
-geändert hat — am ehesten der **Enrollment-/Template-Status** (im Projekt liegt
-`goodix_delete_templates.pcapng`, es wurden also irgendwann Templates gelöscht).
+Why it then differs from the Windows capture is open. The
+most obvious explanation: persistent state that has changed since the capture
+— most likely the **enrollment/template status** (the project contains
+`goodix_delete_templates.pcapng`, so templates were deleted at some point).
 
-### Was das praktisch bedeutet — und es ist gute Nachricht
-Von 1431 Byte sind **1287 replaybare Konstanten**. Pro Response variieren nur:
-- 32 B Nonce (erzeugt der Sensor selbst)
-- 112 B Schwanz (Signatur/MAC, erzeugt der Sensor selbst)
+### What this means in practice — and it is good news
+Out of 1431 bytes, **1287 are replayable constants**. Per response, only the following vary:
+- 32 B Nonce (generated by the sensor itself)
+- 112 B tail (Signature/MAC, generated by the sensor itself)
 
-Beides erzeugt der **Sensor**, nicht der Host. Für einen funktionierenden
-driver müssen wir diese Felder also gar nicht berechnen können — wir müssen nur
-**gültige Anfragen senden**, und eine solche haben wir aus dem Mitschnitt.
+Both are generated by the **sensor**, not the host. For a working
+driver we don't even need to be able to calculate these fields — we only have to
+**send valid requests**, and we have one of those from the capture.
 
-### Korrektur zu Section 13
-`b0 02 00` liefert 32 × 16-Bit-Werte. Ich hatte sie als „Live-Messwerte"
-eingeordnet — falsch. Über alle vier Runs sind sie **bis auf ein einziges Byte
-identisch** (152, 155, 131, 118, 154, 154, …). Gegenüber Windows weichen sie ab
-(143, 147, 114, 98, …). Es sind also **Kalibrierwerte**, die vom device state
-abhängen, nicht vom Zufall. Wert­bereich in beiden Fällen 0..203.
-Die Evaluation in `classify_diff()` ist entsprechend korrigiert.
+### Correction to Section 13
+`b0 02 00` returns 32 × 16-bit values. I had classified them as "live measurements"
+— wrong. Across all four runs they are **identical except for a single byte**
+(152, 155, 131, 118, 154, 154, …). Compared to Windows they differ
+(143, 147, 114, 98, …). So they are **calibration values** that depend on the device state,
+not on randomness. Value range in both cases 0..203.
+The evaluation in `classify_diff()` has been corrected accordingly.
 
-### Nächster Step
-Den Replay **über Frame 65 hinaus** bis zum Ende der Unlock-Sequenz laufen
-lassen. Damit klärt sich die entscheidende Frage: nimmt der Sensor eine
-complete replayte Session end-to-end an?
+### Next Step
+Run the replay **beyond Frame 65** up to the end of the unlock sequence.
+This clarifies the crucial question: does the sensor accept a
+completely replayed session end-to-end?
 
 ```bash
-sudo python3 scratch/sdcp_replay.py        # ohne --until = kompletter Flow/Sequence
+sudo python3 scratch/sdcp_replay.py        # without --until = complete flow/sequence
 ```
 
-Besonders interessant ist Frame 105/113: `a5 00 00` mit 32-Byte-Key liefert
-**1110 Byte** zurück, deren Kopf strukturiert ist
-(`5c 64 45 00 00 00 00 62 00 43 04 f5 …`, danach 16 Nullbytes, dann hochentrop).
-Die ersten beiden Bytes `5c 64` tauchen auch in der `a2 00 00`-Response auf
-(`00 5c 64 00 1f 00 3b 00`) — dort, wo laut Section 2 das Finger-Event steht.
+Particularly interesting is Frame 105/113: `a5 00 00` with 32-byte key returns
+**1110 bytes**, whose head is structured
+(`5c 64 45 00 00 00 00 62 00 43 04 f5 …`, followed by 16 null bytes, then highly entropic).
+The first two bytes `5c 64` also appear in the `a2 00 00` response
+(`00 5c 64 00 1f 00 3b 00`) — right where the finger event is according to Section 2.
 
-**Risiko:** Die Sequenz enthält `a5 01 00` (`01 00 00 00`) und `e0 00 00`, die
-device state schreiben könnten. Es ist ein Unlock-/Verify-Flow/Sequence, kein Enroll
-und kein Delete (dafür gibt es eigene Captures), das Risiko ist also gering —
-aber nicht null.
+**Risk:** The sequence contains `a5 01 00` (`01 00 00 00`) and `e0 00 00`, which
+might write device state. It is an unlock/verify flow/sequence, not enroll
+and not delete (there are separate captures for those), so the risk is low —
+but not zero.
 
 ---
 
 ## 16. Complete Replay + Alignment with `walkthrough.md`
 
-### Result des kompletten Replays
-Von 12 erwarteten Responseen kamen 10 strukturell korrekt zurück:
+### Result of the complete replay
+Out of 12 expected responses, 10 returned structurally correct:
 
-| Frame | Kommando | Result |
+| Frame | Command | Result |
 |---|---|---|
-| 41 | `e1 04 00` | ✅ (nur device statesbyte) |
-| 53 | `e3 02 00` | ✅ byte-identisch |
-| 65 | `e3 00 00` | ✅ 1431 B, gleiche Struktur |
-| 77 | `b0 02 00` | ✅ Kalibrierwerte |
+| 41 | `e1 04 00` | ✅ (only device state byte) |
+| 53 | `e3 02 00` | ✅ byte-identical |
+| 65 | `e3 00 00` | ✅ 1431 B, same structure |
+| 77 | `b0 02 00` | ✅ calibration values |
 | 89 | `e0 01 00` | ✅ |
-| **101** | `a2 00 00` (`01 00 23 01`) | ❌ **gar keine Response**, nur ACK. Windows: `00 5c 64 00 1f 00 3b 00` |
-| **113** | `a5 00 00` | ❌ **`ff`** statt 1110 B |
-| 125 | `e0 00 00` | ✅ byte-identisch |
-| 137 | `a5 01 00` | ✅ byte-identisch (`00`) |
-| 149 | `e3 02 00` | ✅ byte-identisch |
-| 161 | `e3 01 00` | ✅ 33 B, Status `00` + 32 B fresh/dynamicer MAC |
+| **101** | `a2 00 00` (`01 00 23 01`) | ❌ **no response at all**, only ACK. Windows: `00 5c 64 00 1f 00 3b 00` |
+| **113** | `a5 00 00` | ❌ **`ff`** instead of 1110 B |
+| 125 | `e0 00 00` | ✅ byte-identical |
+| 137 | `a5 01 00` | ✅ byte-identical (`00`) |
+| 149 | `e3 02 00` | ✅ byte-identical |
+| 161 | `e3 01 00` | ✅ 33 B, status `00` + 32 B fresh/dynamic MAC |
 | 173 | `b0 02 00` | ✅ |
 
-Der gesamte Handshake ist also replaybar. Die Grenze liegt bei `a2 00 00`
-mit Payload `01 00 23 01` — dort liefert der Sensor bei uns keine Scan-Status-
-Daten, und in der Folge gibt `a5 00 00` nur `ff` zurück.
+The entire handshake is thus replayable. The boundary lies at `a2 00 00`
+with payload `01 00 23 01` — there the sensor provides no scan status
+data for us, and subsequently `a5 00 00` only returns `ff`.
 
-Nebenbefund: `a2 00 00` mit `01 00 23 01` (Frame 93) liefert im Mitschnitt
-Daten, mit `01 00 23 00` (Frame 177) nur ein ACK — das letzte Byte schaltet
-also offenbar etwas ein bzw. aus.
+Incidental finding: `a2 00 00` with `01 00 23 01` (Frame 93) yields data in the capture,
+with `01 00 23 00` (Frame 177) only an ACK — the last byte thus
+apparently turns something on or off.
 
 ### Alignment with `walkthrough.md` — Wire Format Confirmed
-`walkthrough.md` dokumentiert (aus früherer Arbeit im Projekt):
+`walkthrough.md` documents (from previous work in the project):
 
 > `MAC (32 Bytes) + Header (01 FF) + Length (4 Bytes) + IV (16 Bytes) + Ciphertext`
 
 This matches **exactly** the structure derived independently from wire traces
-Draht abgeleitet wurde (`[32 B][01 ff][4 B Length][Body]`). Zwei unabhängige
+(`[32 B][01 ff][4 B Length][Body]`). Two independent
 derivations, identical result — confirming the transport format.
-Meine Bezeichnung „Nonce" für die ersten 32 Byte war falsch: es ist ein
+My designation "Nonce" for the first 32 bytes was wrong: it is an
 **HMAC-SHA256**. The payload body begins with a **16-byte IV**.
 
-Das erklärt auch die Feldkarte aus Section 14 zwanglos: AES-CTR ist eine
-Stromchiffre. Bei identischem Key, identischem IV und einem Klartext,
-der sich nur am Ende unterscheidet, unterscheidet sich auch der Ciphertext nur
-am Ende — genau die beobachteten 1287 staticen + 112 fresh/dynamicen Byte. Der MAC
-ändert sich mit, weil der Ciphertext sich ändert.
+This casually explains the field map from Section 14: AES-CTR is a
+stream cipher. With an identical key, identical IV, and a plaintext
+that only differs at the end, the ciphertext also only differs
+at the end — exactly the observed 1287 static + 112 fresh/dynamic bytes. The MAC
+changes with it because the ciphertext changes.
 
-### Status der Technik im Projekt
-`test_get_image.py` (718 Zeilen) implementiert laut `walkthrough.md` bereits:
-ECDH P-256, Ableitung der AES-/HMAC-Key (verifiziert: der **reine**
-Shared Secret dient direkt als Key, ohne Key Expansion), verschlüsseltes
-Client-Identity-Paket, Authentifizierung, Finger-Erkennung und Auslesen des
-`b0 02 00`-Arrays. `find_ec_pubkey_in_server_hello()` dokumentiert das Layout
-der Server-Response:
+### State of the art in the project
+`test_get_image.py` (718 lines) already implements according to `walkthrough.md`:
+ECDH P-256, derivation of the AES/HMAC key (verified: the **raw**
+shared secret serves directly as key, without key expansion), encrypted
+client identity packet, authentication, finger detection, and reading out the
+`b0 02 00` array. `find_ec_pubkey_in_server_hello()` documents the layout
+of the server response:
 
 ```
-    0.. 63   Session-Header / Nonce-Material
-   64..910   X.509-Certificate (847 B)  -> staticer Sensor-Key
-  911..975   ephemerer ECDH-Public-Key #1 (65 B, unkomprimiert)
-  976..1040  EC-Punkt #2 / Proof-of-Possession (65 B)
- 1041..Ende  HMAC / Signatur
+    0.. 63   Session header / Nonce material
+   64..910   X.509 certificate (847 B)  -> static sensor key
+  911..975   ephemeral ECDH public key #1 (65 B, uncompressed)
+  976..1040  EC point #2 / Proof-of-Possession (65 B)
+ 1041..End   HMAC / Signature
 ```
 
-Das deckt sich exact mit dem, was in Section 11 an unserer eigenen Response
-gemessen wurde (64 B Vorspann, 847 B Certificate, dann `04`-Präfix bei 911).
+This exactly matches what was measured on our own response in Section 11
+(64 B prefix, 847 B certificate, then `04` prefix at 911).
 
-### Konsequenz für den C-driver
-Der `openssl s_client`-Subprozess in `goodixtls.c` und die vierstufige
-TLS-Handshake-SSM in `goodix.c` sind **konzeptionell falsch** und müssen durch
-den ECDH-Flow/Sequence aus `test_get_image.py` ersetzt werden. Die Arbeiten aus
-Section 10 (Puffer-Resync, CRC8-Validierung, Padding-Behandlung,
-`data_to_str`-Fix, Kommandoverkettung) bleiben davon unberührt und weiterhin
-gültig — sie betreffen die Transportschicht, nicht die Krypto.
+### Consequence for the C driver
+The `openssl s_client` subprocess in `goodixtls.c` and the four-stage
+TLS handshake SSM in `goodix.c` are **conceptually wrong** and must be replaced by
+the ECDH flow/sequence from `test_get_image.py`. The work from
+Section 10 (buffer resync, CRC8 validation, padding handling,
+`data_to_str` fix, command chaining) remains unaffected and continues to be
+valid — it concerns the transport layer, not the cryptography.
 
-### Nächster Step
-`test_get_image.py` gegen die Hardware laufen lassen. `cryptography` ist
-vorhanden. Das zeigt, wie weit der Live-ECDH-Handshake heute tatsächlich kommt
-— und ist aussagekräftiger als jeder weitere Replay.
+### Next Step
+Run `test_get_image.py` against the hardware. `cryptography` is
+available. This will show how far the live ECDH handshake actually gets today
+— and is more informative than any further replay.
 
 ---
 
 ## 17. Breakthrough: Cryptography is mbedTLS with `TLS-PSK-WITH-AES-128-CBC-SHA256`
 
-### Was die Measurements ergaben
-- **Reihenfolge war es nicht.** `win_order_probe.py` bildet den Windows-Flow/Sequence
-  exact nach (`e1 04 00` zuerst, `b0 02 00` mit 1 Byte `00`, `e0 01 00` mit
-  1 Byte, `a2 00 00` mit `01 00 23 01`). Alle Responseen stimmen jetzt mit dem
-  Mitschnitt überein — `b0 02 00` → 65 B, `a2` → `005d64001f003900`
+### What the measurements revealed
+- **It was not the sequence.** `win_order_probe.py` exactly replicates the Windows flow/sequence
+  (`e1 04 00` first, `b0 02 00` with 1 byte `00`, `e0 01 00` with
+  1 byte, `a2 00 00` with `01 00 23 01`). All responses now match the
+  capture — `b0 02 00` → 65 B, `a2` → `005d64001f003900`
   (Windows `005c64001f003b00`), `e0 00 00` → `00000000`, `a5 01 00` → `00`.
-  Nur `a5 00 00` bleibt bei `04`.
-- **EC-Punkt war es auch nicht.** `key_sweep.py` hat alle drei Punkte aus dem
-  Server-Hello × Key-Expansion an/aus durchprobiert. Alle sechs → `04`.
-- **Und der eigentliche Befund:** in keiner der 24 geprüften Kombinationen
-  (6 Ableitungen × 4 MAC-Formeln) ließ sich die 32-Byte-Response des Sensors
-  auf `e3 01 00` verifizieren.
+  Only `a5 00 00` stays at `04`.
+- **It was not the EC point either.** `key_sweep.py` tried all three points from the
+  Server-Hello × Key-Expansion on/off. All six → `04`.
+- **And the actual finding:** in none of the 24 tested combinations
+  (6 derivations × 4 MAC formulas) could the 32-byte response of the sensor
+  to `e3 01 00` be verified.
 
-### Damit fällt eine zentrale Annahme
-`test_get_image.py` wertet `len == 33 and resp[0] == 0x00` als
-„[SUCCESS] Handshake Completed! Server Identity verified." Der Sensor antwortet
-aber **immer** so — auch mit nachweislich falschen Keyn. Diese
-Success message hat nie etwas belegt, und `walkthrough.md` Section 3
-(„Successfully authenticates the host with the sensor!") beruht darauf.
+### Thus a central assumption falls
+`test_get_image.py` evaluates `len == 33 and resp[0] == 0x00` as
+"[SUCCESS] Handshake Completed! Server Identity verified." However, the sensor **always**
+answers like this — even with demonstrably incorrect keys. This
+success message never proved anything, and `walkthrough.md` Section 3
+("Successfully authenticates the host with the sensor!") is based on it.
 
 ### Binary Reverse Engineering Findings
 `GoodixMocSensorAdapter.dll` contains static mbedTLS symbols:
@@ -764,449 +761,692 @@ Success message hat nie etwas belegt, und `walkthrough.md` Section 3
 ```
   ..\CODE\mbedtls\Src\ssl_tls.c          statically linked mbedTLS
   ..\CODE\mbedtls\Src\ssl_cli.c
-  TLS-PSK-WITH-AES-128-CBC-SHA256        die Cipher-Suite
+  TLS-PSK-WITH-AES-128-CBC-SHA256        the cipher suite
   mbedtls_ssl_psk_derive_premaster
   mbedtls_ssl_derive_keys
   => calc finished tls sha256
-  gf_sha256 / gf_hmac_sha256             Goodix-Wrapper
-  secp256r1, alle vier P-256-Konstanten (als mbedTLS-Limbs)
+  gf_sha256 / gf_hmac_sha256             Goodix wrapper
+  secp256r1, all four P-256 constants (as mbedTLS limbs)
 ```
 
-No BCrypt/NCrypt imports — cryptography is statically compiled into the DLL. Die Suite
-erklärt die Observations am Draht lückenlos: **AES-128-CBC** (16-Byte-IV,
-Ciphertext auf 16 gepolstert) und **HMAC-SHA256** (32-Byte-MAC vorn).
+No BCrypt/NCrypt imports — cryptography is statically compiled into the DLL. The suite
+seamlessly explains the observations on the wire: **AES-128-CBC** (16-byte IV,
+ciphertext padded to 16) and **HMAC-SHA256** (32-byte MAC in front).
 
-### Die vermutete Ursache
-`mbedtls_ssl_psk_derive_premaster` baut den Premaster nach RFC 4279:
+### The suspected cause
+`mbedtls_ssl_psk_derive_premaster` builds the premaster according to RFC 4279:
 
 ```
-  reines PSK :  premaster = uint16(N) || N Nullbytes || uint16(N) || psk
-  ECDHE-PSK  :  premaster = uint16(|Z|) || Z        || uint16(N) || psk
-  danach:  master_secret = PRF(premaster, "master secret", cr||sr, 48)
-           key_block     = PRF(master_secret, "key expansion", sr||cr, n)
+  pure PSK   :  premaster = uint16(N) || N null bytes || uint16(N) || psk
+  ECDHE-PSK  :  premaster = uint16(|Z|) || Z          || uint16(N) || psk
+  afterwards :  master_secret = PRF(premaster, "master secret", cr||sr, 48)
+                key_block     = PRF(master_secret, "key expansion", sr||cr, n)
 ```
 
-`derive_goodix_gtls_keys()` steckt stattdessen das **rohe ECDH-Result** als
-Secret hinein. Die Suite heißt zudem `TLS-PSK-…`, nicht `TLS-ECDHE-PSK-…` —
-wenn das zutrifft, spielt das ECDH-Result für die Sessionsschlüssel gar keine
-Rolle. Das erklärt zwanglos, warum alle sechs EC-Kandidaten identisch scheiterten.
+Instead, `derive_goodix_gtls_keys()` feeds the **raw ECDH result** into it as
+the secret. Moreover, the suite is called `TLS-PSK-…`, not `TLS-ECDHE-PSK-…` —
+if this is true, the ECDH result plays no role in the session keys at all.
+This casually explains why all six EC candidates failed identically.
 
-### Neues Tool
-`scratch/kdf_sweep.py` probiert 12 Kombinationen durch:
-3 Premaster-Varianten (reines PSK / ECDHE-PSK / rohes Z) × Key-Expansion an+aus
-× 2 Key-Block-Layouts (Goodix `aes16|iv16|hmac32` und TLS-Standard
-`cMAC32|sMAC32|cKey16|sKey16|cIV16|sIV16`). Zusätzlich wird die Server-Response
-gegen vier MAC-Formeln verified, darunter die TLS-`finished`-PRF.
+### New Tool
+`scratch/kdf_sweep.py` tries out 12 combinations:
+3 premaster variants (pure PSK / ECDHE-PSK / raw Z) × key expansion on+off
+× 2 key block layouts (Goodix `aes16|iv16|hmac32` and TLS standard
+`cMAC32|sMAC32|cKey16|sKey16|cIV16|sIV16`). Additionally, the server response
+is verified against four MAC formulas, including the TLS `finished` PRF.
 
 ```bash
 sudo python3 scratch/kdf_sweep.py 2>&1 | tee kdf_sweep.log
 ```
 
-### Korrigierte Feldkarte
-Der in Section 14 vermutete „Trailer" existiert nicht. Bei allen fünf
-`e3`-Frames des Mitschnitts geht die Rechnung auf:
+### Corrected Field Map
+The "trailer" suspected in Section 14 does not exist. For all five
+`e3` frames of the capture, the calculation checks out:
 
 ```
-  MAC(32) || 01 ff || Klartextlänge(LE32) || IV(16) || AES-CBC(pad16(Klartext))
+  MAC(32) || 01 ff || plaintext length(LE32) || IV(16) || AES-CBC(pad16(plaintext))
        162 -> 176        1366 -> 1376          32 -> 48
 ```
 
-Außerdem beginnt `unlock_success_flow.txt` bei Frame 33 **mitten in einer
-laufenden Session** — Frame 45 ist bereits verschlüsselt. Der eigentliche
-Handshake dieser Aufzeichnung fehlt darin.
+Furthermore, `unlock_success_flow.txt` begins at Frame 33 **in the middle of an
+ongoing session** — Frame 45 is already encrypted. The actual
+handshake of this recording is missing from it.
 
 ---
 
-## 18. Krypto-Status: Black-Box ausgereizt, Tools für Ghidra bereit (2026-07-28)
+## 18. Crypto Status: Black-Box Exhausted, Tools for Ghidra Ready (2026-07-28)
 
-### Was jetzt sicher ist
-- **`01` = kein Match, `04` = anderer Error, `1110 B` = Auth-Token.** Aus den
-  pcaps direkt abgelesen: `goodix_unlock_success` → `a5 00 00` liefert 1110 B;
-  `goodix_unlock_fail` → `01`; unser Live-Versuch → `04`. Unsere Session
-  authentifiziert also nicht einmal so weit wie ein *fehlgeschlagener* Windows-
-  Unlock. Der Handshake ist der Bruchpunkt, nicht der Finger-Match.
-- **Der Sessionsschlüssel ist nicht aus dem PSK allein ableitbar.** Ein
-  Offline-Angriff mit 163 Keykandidaten (PSK, SHA256(PSK), sämtliche
-  PRF-Ausgaben mit „master secret"/„key expansion"/„client finished"/
-  „server finished" über cr‖sr, sr‖cr, …) gegen das PKCS7-Padding-Orakel der
-  ersten Nachricht: **kein Treffer**.
-- **Standard-TLS-Ableitung reproduziert die Server-Response nicht.** Selbst mit
-  bekanntem ECDH-Z (aus unseren Live-Läufen) ergab keine der 24 Kombinationen
-  aus `key_sweep.py`/`kdf_sweep.py` die 32-Byte-Response des Sensors auf
-  `e3 01 00`. Die Ableitung ist nicht Lehrbuch-mbedTLS.
-- **Windows sendet nie einen Klartext-ECDH-Hello.** In allen Captures ist schon
-  die erste `e3 02 00` verschlüsselt. Der Key wird also nicht sichtbar
-  über USB ausgehandelt.
+### What is certain now
+- **`01` = no match, `04` = other error, `1110 B` = Auth-Token.** Read directly from the
+  pcaps: `goodix_unlock_success` → `a5 00 00` returns 1110 B;
+  `goodix_unlock_fail` → `01`; our live attempt → `04`. Thus, our session
+  does not even authenticate as far as a *failed* Windows unlock.
+  The handshake is the breaking point, not the finger match.
+- **The session key cannot be derived from the PSK alone.** An
+  offline attack with 163 key candidates (PSK, SHA256(PSK), all
+  PRF outputs with "master secret"/"key expansion"/"client finished"/
+  "server finished" over cr‖sr, sr‖cr, …) against the PKCS7 padding oracle of the
+  first message: **no hit**.
+- **Standard TLS derivation does not reproduce the server response.** Even with
+  a known ECDH-Z (from our live runs), none of the 24 combinations
+  from `key_sweep.py`/`kdf_sweep.py` resulted in the 32-byte response of the sensor
+  to `e3 01 00`. The derivation is not textbook mbedTLS.
+- **Windows never sends a plaintext ECDH hello.** In all captures, even the
+  first `e3 02 00` is already encrypted. The key is thus not visibly
+  negotiated over USB.
 
-### Nebenbefund: IV-Wiederverwendung
-Der driver verwendet IVs mehrfach (`goodix_unlock_success`: 29 von 50
-Nachrichten teilen sich einen IV mit einer anderen). Mehrere Paare sind sogar
-**byte-identisch** (gleicher IV + gleicher Ciphertext = wortgleiche Nachricht
-zweimal gesendet). Das ist kryptografisch unsauber, hilft aber nicht beim
-Key, weil der IV ohnehin im Klartext mitgeschickt wird.
+### Incidental finding: IV reuse
+The driver reuses IVs (`goodix_unlock_success`: 29 out of 50
+messages share an IV with another). Several pairs are even
+**byte-identical** (same IV + same ciphertext = literally the same message
+sent twice). This is cryptographically sloppy, but doesn't help with the
+key because the IV is sent in plaintext anyway.
 
-### Neues Tool: `scratch/pcap_crypto.py`
-Eigenständiger pcapng-Parser + Entschlüsselungs-Orakel. Lädt alle 159
-verschlüsselten Nachrichten aus den Captures und prüft einen Keykandidaten
-gegen zwei unabhängige Orakel (PKCS7-Padding und HMAC-SHA256 über
-`01ff|len|IV|CT`). Self-test bestanden: Zero-Key → 0 Fehltreffer bei 159
-Nachrichten, das Orakel ist also trennscharf.
+### New Tool: `scratch/pcap_crypto.py`
+Standalone pcapng parser + decryption oracle. Loads all 159
+encrypted messages from the captures and tests a key candidate
+against two independent oracles (PKCS7 padding and HMAC-SHA256 over
+`01ff|len|IV|CT`). Self-test passed: zero key → 0 false hits for 159
+messages, so the oracle is highly discriminatory.
 
 ```bash
-python3 scratch/pcap_crypto.py                  # Übersicht
-python3 scratch/pcap_crypto.py --key <hex16>    # Kandidat testen
-# als Bibliothek: from pcap_crypto import try_key, try_derivation
+python3 scratch/pcap_crypto.py                  # Overview
+python3 scratch/pcap_crypto.py --key <hex16>    # Test candidate
+# as library: from pcap_crypto import try_key, try_derivation
 ```
 
-Sobald die Ableitung aus Ghidra bekannt ist, verifiziert dieses Skript sie in
-Sekunden gegen physical/real Daten — ohne Hardware.
+As soon as the derivation from Ghidra is known, this script verifies it in
+seconds against physical/real data — without hardware.
 
-### Klare Empfehlung: jetzt Ghidra
-Der Black-Box-Weg ist erschöpft. Das Ziel in `GoodixMocWbdi.dll`:
+### Clear Recommendation: Ghidra now
+The black-box path is exhausted. The goal in `GoodixMocWbdi.dll`:
 
-1. **`gf_hmac_sha256`** — der String steht bei Offset 777912. Von dort die
-   Aufrufer zurückverfolgen: welcher Puffer wird als Key übergeben und
-   woraus entsteht er? Das ist der kürzeste Weg zum `mac_key`.
-2. **`mbedtls_ssl_psk_derive_premaster`** (String bei ~0x3AF...) — zeigt, wie
-   der Premaster zusammengesetzt wird (RFC 4279 oder abgewandelt).
-3. **`mbedtls_ssl_derive_keys`** — Standard oder gepatcht?
+1. **`gf_hmac_sha256`** — the string is at offset 777912. From there trace back the
+   callers: which buffer is passed as the key and
+   what is it generated from? That is the shortest path to the `mac_key`.
+2. **`mbedtls_ssl_psk_derive_premaster`** (string at ~0x3AF...) — shows how
+   the premaster is assembled (RFC 4279 or modified).
+3. **`mbedtls_ssl_derive_keys`** — standard or patched?
 
-Ghidra + JDK liegen bereits im Projekt (`ghidra_11.0.3_PUBLIC/`, `jdk/`).
+Ghidra + JDK are already in the project (`ghidra_11.0.3_PUBLIC/`, `jdk/`).
 
-### Ehrliche Gesamteinschätzung
-Transport, Framing und Krypto-Suite sind complete verstanden und in
-lauffähigen Python-Werkzeugen abgebildet. Was fehlt, ist die **eine**
-Keyableitungsfunktion. Die ist per Black-Box nicht mehr zu erraten — sie
-muss aus dem Binary gelesen werden. Ohne sie kann der Linux-driver keine
-gültige verschlüsselte Nachricht erzeugen und damit den MoC-Sensor nicht zum
-Auth-Token bewegen. Das ist keine Sackgasse, aber die nächste Etappe ist
-statice Reverse-Analyse, kein weiteres Hardware-Probing.
+### Honest overall assessment
+Transport, framing, and crypto suite are completely understood and mapped into
+runnable Python tools. What is missing is the **single**
+key derivation function. That can no longer be guessed via black-box — it
+must be read from the binary. Without it, the Linux driver cannot
+generate a valid encrypted message and thus cannot prompt the MoC sensor for the
+auth token. This is not a dead end, but the next stage is
+static reverse analysis, not further hardware probing.
 
 ---
 
-## 19. Binäranalyse + Schwester-Chip: das Bild wird complete (2026-07-28)
+## 19. Binary Analysis + Sister Chip: the picture becomes complete (2026-07-28)
 
-### objdump statt Ghidra
-Ghidra läuft im Sandbox nicht (gebündelter JDK ist Windows-only, System-JDK ist
-11, Ghidra 11 braucht 17). Ersatz: `objdump -b pei-x86-64` plus selbst
-geschriebene PE-/.pdata-Parser (`/tmp/pe.py`, `/tmp/pdata.py`, `/tmp/xref.py`).
-Damit exact Funktionsgrenzen (2030 Funktionen aus `.pdata`) und
-RIP-relative Xrefs — ausreichend für gezielte Analyse.
+### objdump instead of Ghidra
+Ghidra does not run in the sandbox (bundled JDK is Windows-only, system JDK is
+11, Ghidra 11 needs 17). Replacement: `objdump -b pei-x86-64` plus self-written
+PE/.pdata parsers (`/tmp/pe.py`, `/tmp/pdata.py`, `/tmp/xref.py`).
+With this, exact function boundaries (2030 functions from `.pdata`) and
+RIP-relative Xrefs — sufficient for targeted analysis.
 
-### Was die DLL verrät
-- `GoodixMocWbdi.dll` linkt **mbedTLS** static, Suite
+### What the DLL reveals
+- `GoodixMocWbdi.dll` links **mbedTLS** statically, suite
   **`TLS-PSK-WITH-AES-128-CBC-SHA256`** (Section 17).
-- Der einzige Aufrufer des `gf_hmac_sha256`-Wrappers ist die Funktion
-  **`ProcessPsk`** (VA 0x18008edc0) — das ist die **PSK-Provisionierung**, nicht
-  der Sessions-KDF. Strings dort: `1.check psk if valid`, `3.write psk to mcu`,
+- The only caller of the `gf_hmac_sha256` wrapper is the function
+  **`ProcessPsk`** (VA 0x18008edc0) — this is the **PSK provisioning**, not
+  the session KDF. Strings there: `1.check psk if valid`, `3.write psk to mcu`,
   `sgxPskLen`, `GfSealData`, `PresetPskWriteKey`, `production_write_key`.
-- Der Sessions-KDF nutzt also mbedTLS' eigene HMAC-Funktion, nicht den
-  Goodix-Wrapper — er ist im Binary schwerer zu isolieren.
+- The session KDF therefore uses mbedTLS's own HMAC function, not the
+  Goodix wrapper — it is harder to isolate in the binary.
 
-### Der Schwester-Chip liefert die fehlende Referenz
-`goodix-fingerprint-reversing/capture.py` ist ein **funktionierender** driver
-für den Goodix 55a2 (GF3206) und war bisher unbeachtet. Kernpunkte, die direkt
-auf den GF3268 übertragen:
+### The sister chip provides the missing reference
+`goodix-fingerprint-reversing/capture.py` is a **working** driver
+for the Goodix 55a2 (GF3206) and was previously ignored. Key points that transfer directly
+to the GF3268:
 
-- **Der TLS-PSK ist Zero (32 Nullbytes).** Bestätigt durch die laufende
-  openssl-Zeile: `openssl s_server -nocert -psk 0000…0`. Der 144-Byte-`PSK_WB`
-  ist nur ein Provisionierungs-Blob, der einmalig in den MCU geschrieben wird —
-  er ist **nicht** der Sessionsschlüssel. Dieselben `ProcessPsk`/`PresetPsk`-
-  Funktionen finden sich in unserer GF3268-DLL wieder.
-- **Rollenverteilung:** das Gerät ist der TLS-**Client**, openssl ist der
-  **`s_server`**. Der natasha-C-driver und `test_get_image.py` benutzen
-  dagegen `s_client` bzw. rollen ein eigenes ECDH — **falsche Rolle**.
-- **Flow/Sequence 55a2:** `d0` (REQUEST_TLS) → Gerät sendet ClientHello →
-  an s_server → ServerHello zurück ans Gerät → Gerät sendet
-  ClientKeyExchange+CCS+Finished → an Server → ServerFinished ans Gerät. Reines
-  Standard-TLS-PSK.
+- **The TLS-PSK is zero (32 null bytes).** Confirmed by the running
+  openssl line: `openssl s_server -nocert -psk 0000…0`. The 144-byte `PSK_WB`
+  is just a provisioning blob that is written to the MCU once —
+  it is **not** the session key. The exact same `ProcessPsk`/`PresetPsk`
+  functions are found in our GF3268 DLL.
+- **Role distribution:** the device is the TLS **client**, openssl is the
+  **`s_server`**. The natasha C driver and `test_get_image.py` use
+  `s_client` instead or roll their own ECDH — **wrong role**.
+- **Flow/Sequence 55a2:** `d0` (REQUEST_TLS) → device sends ClientHello →
+  to s_server → ServerHello back to the device → device sends
+  ClientKeyExchange+CCS+Finished → to server → ServerFinished to the device. Pure
+  standard TLS-PSK.
 
-### Der GF3268 ist kein reiner 55a2
-Zwei harte Unterschiede in den Captures:
-1. **Kein einziger TLS-Record-Marker** (`16 03 xx`, `14 03 03`) im gesamten
-   USB-Verkehr aller neun pcaps. Der GF3268 verpackt die mbedTLS-Crypto in ein
-   **eigenes** Record-Format (`MAC32 | 01ff | len | IV | CT`), nicht in
-   Standard-TLS-Records. Der s_server-Proxy-Trick des 55a2 funktioniert daher
-   nicht unverändert.
-2. Der GF3268 hat ein `d0`-Kommando, dessen Response mit `…0002 fe41 5050…`
-   beginnt (in `goodix_init` und `goodix_handshake_and_enroll`, **nicht** im
-   Unlock — der Handshake wird also nur einmal pro Power-Zyklus gemacht und
-   dann wiederverwendet).
+### The GF3268 is not a pure 55a2
+Two hard differences in the captures:
+1. **Not a single TLS record marker** (`16 03 xx`, `14 03 03`) in the entire
+   USB traffic of all nine pcaps. The GF3268 wraps the mbedTLS crypto into a
+   **custom** record format (`MAC32 | 01ff | len | IV | CT`), not in
+   standard TLS records. The s_server proxy trick of the 55a2 therefore
+   does not work unmodified.
+2. The GF3268 has a `d0` command whose response begins with `…0002 fe41 5050…`
+   (in `goodix_init` and `goodix_handshake_and_enroll`, **not** in
+   unlock — so the handshake is only done once per power cycle and
+   then reused).
 
-### Damit ist die Lage präzise
-Alles ist verstanden **außer** der einen Keyableitung aus den
-Handshake-Nonces. Fakten:
-- Crypto = mbedTLS, `TLS-PSK-WITH-AES-128-CBC-SHA256`, **Zero-PSK** (jetzt durch
-  den 55a2-Beleg gestützt, nicht mehr nur Annahme).
-- Standard-TLS-PSK-KDF mit Zero-PSK reproduziert die Session aber nicht
-  (`kdf_sweep.py`, 12 Varianten). Es kommt also ein zusätzlicher Faktor hinzu —
-  am wahrscheinlichsten der ECDHE-Anteil (die Server-Hello enthält ephemere
-  EC-Punkte), d.h. **ECDHE-PSK-Premaster** `Z || PSK-Struktur`, aber mit einer
-  Nonce-/Seed-Belegung, die noch nicht getroffen wurde.
+### Thus the situation is precise
+Everything is understood **except** the single key derivation from the
+handshake nonces. Facts:
+- Crypto = mbedTLS, `TLS-PSK-WITH-AES-128-CBC-SHA256`, **Zero-PSK** (now supported
+  by the 55a2 evidence, no longer just an assumption).
+- However, standard TLS-PSK KDF with Zero-PSK does not reproduce the session
+  (`kdf_sweep.py`, 12 variants). So an additional factor comes into play —
+  most likely the ECDHE portion (the Server-Hello contains ephemeral
+  EC points), i.e. **ECDHE-PSK premaster** `Z || PSK structure`, but with a
+  nonce/seed assignment that has not yet been hit.
 
-### Zwei Wege zum Ziel — Entscheidung nötig
-**A. Frida-Hook auf Windows (schnellster sicherer Weg).**
-Den Windows-driver laufen lassen und `mbedtls_ssl_derive_keys` bzw. die
-AES-Setup-Funktion hooken, um `master_secret` / `key_block` **direkt** zu
-dumpen. Eingaben (Nonces, Z) sind aus unseren Live-Läufen bekannt → die exact
-KDF-Formel ergibt sich aus einem einzigen Input/Output-Paar. `pcap_crypto.py`
-verifiziert sie sofort. Voraussetzung: Windows-Installation mit dem Sensor.
+### Two paths to the goal — decision required
+**A. Frida hook on Windows (fastest safe path).**
+Run the Windows driver and hook `mbedtls_ssl_derive_keys` or the
+AES setup function to dump `master_secret` / `key_block` **directly**. Inputs (nonces, Z)
+are known from our live runs → the exact KDF formula results from a single input/output pair.
+`pcap_crypto.py` verifies it immediately. Requirement: Windows installation with the sensor.
 
-**B. Statische RE weiter (kein Windows nötig, aber langwierig).**
-Die mbedTLS-Handshake-Funktion im Binary complete lesen. Ohne Ghidra/JDK17
-nur mit objdump machbar, aber aufwändig. Braucht als Ersatz einen lauffähigen
-Ghidra (JDK 17 installieren) oder Radare2/Cutter.
+**B. Static RE further (no Windows required, but tedious).**
+Completely read the mbedTLS handshake function in the binary. Without Ghidra/JDK17
+only doable with objdump, but time-consuming. Needs a runnable Ghidra (install JDK 17)
+or Radare2/Cutter as a substitute.
 
-Beides führt zum selben Ziel: sobald die KDF bekannt ist, ist der driver
-geradeaus fertigstellbar — Transport, Framing, Kommandosequenz und Bild-
-Dekodierung (aus `capture.py`/`goodix5xx.c`) liegen bereits vor.
+Both lead to the same goal: once the KDF is known, the driver can be
+straightforwardly completed — transport, framing, command sequence, and image
+decoding (from `capture.py`/`goodix5xx.c`) are already available.
 
-### Tools dieses Schritts (alle offline, im Repo)
-- `/tmp`-Parser sind flüchtig; die dauerhaften liegen als `scratch/pcap_crypto.py`.
-- Empfehlung: die PE-/pdata-/xref-Helfer nach `scratch/` kopieren, falls die
-  RE offline fortgesetzt wird (siehe unten, werden mit angelegt).
+### Tools of this step (all offline, in the repo)
+- `/tmp` parsers are volatile; the persistent ones are located as `scratch/pcap_crypto.py`.
+- Recommendation: copy the PE/pdata/xref helpers to `scratch/` if the
+  RE is continued offline (see below, are created with it).
 
 ---
 
-## 20. Session-Krypto lokalisiert + Frida-Skript bereit (2026-07-28)
+## 20. Session crypto localized + Frida script ready (2026-07-28)
 
-### Wichtige Modul-Aufteilung (per objdump/Export-Analyse)
-- **`GoodixMocWbdi.dll`** — Algorithmus/Templates (enrol*, identify*, template*,
-  preprocess*). Enthält mbedTLS, aber die HMAC-Wrapper (`gf_hmac_sha256`) werden
-  dort nur von `ProcessPsk` (PSK-Provisionierung) benutzt.
-- **`GoodixMocSensorAdapter.dll`** — **Transport-Adapter, hier sitzt die
-  Session-Krypto.** Enthält die mbedTLS-Cipher-Strings `AES-128-CBC` … und die
-  SHA256-Init-Konstante in **8 Funktionen** (SHA256 + HMAC-Schichten).
-- `GoodixMocStorageAdapter.dll` — Template-Speicherverschlüsselung (volle
-  mbedTLS-Cipherliste inkl. GCM/CCM; für die Session irrelevant).
+### Important module division (via objdump/export analysis)
+- **`GoodixMocWbdi.dll`** — Algorithm/Templates (enrol*, identify*, template*,
+  preprocess*). Contains mbedTLS, but the HMAC wrappers (`gf_hmac_sha256`) are
+  only used there by `ProcessPsk` (PSK provisioning).
+- **`GoodixMocSensorAdapter.dll`** — **Transport adapter, this is where the
+  session crypto sits.** Contains the mbedTLS cipher strings `AES-128-CBC` … and the
+  SHA256 init constant in **8 functions** (SHA256 + HMAC layers).
+- `GoodixMocStorageAdapter.dll` — Template storage encryption (full
+  mbedTLS cipher list incl. GCM/CCM; irrelevant for the session).
 
-### AES ist weder tabellen- noch AES-NI-basiert
-Weder AES-S-Box noch AES-NI-Instruktionen in irgendeiner DLL. mbedTLS ist also
-mit laufzeit-generierten Tabellen gebaut. Der AES-Key ist damit static
-nicht per Konstante auffindbar — aber er stammt ohnehin aus der HMAC-SHA256-PRF,
-und **SHA256 ist auffindbar**. Deshalb zielt der Hook auf die SHA256/HMAC-Ebene.
+### AES is neither table- nor AES-NI-based
+Neither AES S-Box nor AES-NI instructions in any DLL. Thus mbedTLS is
+built with runtime-generated tables. The AES key can therefore not be found
+statically via constant — but it comes from the HMAC-SHA256-PRF anyway,
+and **SHA256 is findable**. That's why the hook targets the SHA256/HMAC layer.
 
-### SHA256-/HMAC-Funktionen in GoodixMocSensorAdapter.dll (RVA, image_base 0x180000000)
+### SHA256/HMAC functions in GoodixMocSensorAdapter.dll (RVA, image_base 0x180000000)
 ```
-  0x25580 (266 B)    0x26630 (198 B)    0x30bc0 (1175 B, PRF-Kandidat)
-  0x324a2 (125 B)    0x326a7 (612 B, HMAC-Kandidat)   0x32a10 (237 B)
+  0x25580 (266 B)    0x26630 (198 B)    0x30bc0 (1175 B, PRF candidate)
+  0x324a2 (125 B)    0x326a7 (612 B, HMAC candidate)   0x32a10 (237 B)
   0x34880 (296 B)    0x34a26 (180 B)
 ```
 
 ### Deliverable: `scratch/frida_kdf_dump.js`
-Hookt diese acht Funktionen in **GoodixMocSensorAdapter.dll** und dumpt ihre
-Zeiger-Argumente. Der Session-KDF ist eine Kette von HMAC-SHA256; im Trace ist
-der `master_secret`-Step (Key = Zero-PSK-Struktur) und der `key expansion`-
-Step (liefert AES-Key ‖ HMAC-Key) direkt erkennbar.
+Hooks these eight functions in **GoodixMocSensorAdapter.dll** and dumps their
+pointer arguments. The session KDF is a chain of HMAC-SHA256; in the trace,
+the `master_secret` step (Key = Zero-PSK structure) and the `key expansion`
+step (returns AES key ‖ HMAC key) are directly recognizable.
 
-**Flow/Sequence auf Windows:**
+**Flow/Sequence on Windows:**
 ```
 pip install frida-tools
-frida-ps -ai                         # Prozess mit GoodixMocSensorAdapter.dll finden
-                                     # (Windows Hello = Dienst WbioSrvc in svchost.exe)
+frida-ps -ai                         # Find process with GoodixMocSensorAdapter.dll
+                                     # (Windows Hello = Service WbioSrvc in svchost.exe)
 frida -p <PID> -l scratch/frida_kdf_dump.js
-# dann fingerprint-Unlock/Enroll auslösen
+# then trigger fingerprint unlock/enroll
 ```
-Ausgabe: Konsole + `goodix_kdf_trace.txt`.
+Output: Console + `goodix_kdf_trace.txt`.
 
-**Feinschliff:** Ist im Trace die mbedTLS-Einweg-HMAC erkennbar (6 Argumente:
-md_info, key, keylen, in, ilen, out), ihren RVA in `HMAC_ONESHOT_RVA` eintragen —
-dann werden Key/Daten/MAC sauber isoliert geloggt statt heuristisch.
+**Fine-tuning:** If the mbedTLS one-shot HMAC is recognizable in the trace (6 arguments:
+md_info, key, keylen, in, ilen, out), enter its RVA into `HMAC_ONESHOT_RVA` —
+then key/data/MAC will be logged cleanly isolated instead of heuristically.
 
-### Verifikation
-Der gedumpte AES-Key wird sofort verified:
+### Verification
+The dumped AES key is verified immediately:
 ```
-python3 scratch/pcap_crypto.py --key <16-Byte-Hex>
+python3 scratch/pcap_crypto.py --key <16-byte-hex>
 ```
-Bei >50 % sauber entschlüsselter Nachrichten ist die KDF cracked/broken und der
-Linux-driver kann die Ableitung nachbauen.
+If >50% of the messages are cleanly decrypted, the KDF is cracked/broken and the
+Linux driver can reconstruct the derivation.
 
-### Damit ist die Analyse abgeschlossen übergeben
-Alle Bausteine für einen lauffähigen driver liegen vor und sind dokumentiert:
-Transport, Framing (`MAC|01ff|len|IV|CT`), Kommandosequenz (Section 16),
-Statuscodes (`01`=kein Match, `04`=nicht auth, 1110 B=Token), Krypto-Suite,
-Zero-PSK, Bild-Dekodierung (`capture.py`/`goodix5xx.c`) sowie die RE-Tools
-(`scratch/re_tools/`, `scratch/pcap_crypto.py`) und der Frida-Extraktor. Die
-einzige verbleibende Unbekannte — die genaue KDF — wird durch den Frida-Trace
-auf echter Windows-Hardware in einem Run sichtbar.
+### The analysis is thus completely handed over
+All building blocks for a working driver are available and documented:
+transport, framing (`MAC|01ff|len|IV|CT`), command sequence (Section 16),
+status codes (`01`=no match, `04`=not auth, 1110 B=token), crypto suite,
+Zero-PSK, image decoding (`capture.py`/`goodix5xx.c`) as well as the RE tools
+(`scratch/re_tools/`, `scratch/pcap_crypto.py`) and the Frida extractor. The
+only remaining unknown — the exact KDF — will become visible in one run through
+the Frida trace on real Windows hardware.
 
 ---
 
-## 21. Offline-Wege erschöpft — Ghidra-Paket für den Linux-Rechner (2026-07-28)
+## 21. Offline paths exhausted — Ghidra package for the Linux machine (2026-07-28)
 
-### Was noch tested und ausgeschlossen wurde
-- **OTP als Key:** `a6 00` (READ_OTP) liefert 16 strukturierte Bytes, aber
-  sie sind **kein** AES-Key (0-2/159 Padding-Treffer = Zufall). Der Wert ändert
-  sich zudem zwischen Captures (Zähler `0001`→`0002`); er ist eine **Challenge**,
-  die in der 1110-Byte-`a5`-Response zurückgespiegelt wird (das `62 00 43 04 f5 …
-  c2b3231e…`-Muster in beiden).
-- **Certificatesbasierte Key:** SHA256(cert), SHA256(pubkey), HMAC(PSK,·),
-  alle EC-Punkt-Fenster und 786 gleitende 16-Byte-Fenster aus dem
-  Handshake-Material — **kein Treffer**.
-- **Kein Klartext-Handshake im e3-Kanal:** Vor der ersten verschlüsselten
-  `e3 02 00` stehen nur `d0` (Geräte-Identität „RONGYAO/GM188…"), `d6`, `c0`
-  (MCU-Config), `e1`, `a6` (OTP). Es gibt **keinen** sichtbaren Nonce-/Key-
-  Austausch — die Keyableitung ist rein im driver, nicht auf dem Draht.
+### What else was tested and ruled out
+- **OTP as key:** `a6 00` (READ_OTP) returns 16 structured bytes, but
+  they are **not** an AES key (0-2/159 padding hits = random). The value also
+  changes between captures (counter `0001`→`0002`); it is a **challenge**
+  that is mirrored back in the 1110-byte `a5` response (the `62 00 43 04 f5 …
+  c2b3231e…` pattern in both).
+- **Certificate-based keys:** SHA256(cert), SHA256(pubkey), HMAC(PSK,·),
+  all EC point windows and 786 sliding 16-byte windows from the
+  handshake material — **no hit**.
+- **No plaintext handshake in the e3 channel:** Before the first encrypted
+  `e3 02 00` there are only `d0` (device identity "RONGYAO/GM188…"), `d6`, `c0`
+  (MCU config), `e1`, `a6` (OTP). There is **no** visible nonce/key
+  exchange — the key derivation is purely in the driver, not on the wire.
 
-Fazit: Der Session-Key lässt sich **nicht** aus den Captures rekonstruieren.
-Er braucht die KDF-Funktion aus `GoodixMocSensorAdapter.dll`.
+Conclusion: The session key can **not** be reconstructed from the captures.
+It needs the KDF function from `GoodixMocSensorAdapter.dll`.
 
-### Warum Frida hier nicht greift
-Frida müsste **auf Windows** laufen, wo der Goodix-driver aktiv ist. Auf dem
-Linux-Zielrechner läuft der Windows-driver nicht. Das `frida_kdf_dump.js`
-bleibt gültig — aber nur, falls eine Windows-Installation/VM mit dem Sensor
-verfügbar ist (die `goodix_vm_traffic.pcapng` legt nahe, dass es mal eine VM gab).
+### Why Frida doesn't work here
+Frida would have to run **on Windows**, where the Goodix driver is active. On the
+Linux target machine, the Windows driver does not run. The `frida_kdf_dump.js`
+remains valid — but only if a Windows installation/VM with the sensor
+is available (the `goodix_vm_traffic.pcapng` suggests that there once was a VM).
 
-### Empfohlener Weg: Ghidra headless auf dem Linux-Rechner
-Vollständig lokal, kein Windows nötig. Ghidra liegt bereits im Projekt.
+### Recommended path: Ghidra headless on the Linux machine
+Completely local, no Windows required. Ghidra is already in the project.
 
 ```bash
-# 1. JDK 17 installieren (CachyOS/Arch):
+# 1. Install JDK 17 (CachyOS/Arch):
 sudo pacman -S jdk17-openjdk
-# 2. Dekompilierung starten:
+# 2. Start decompilation:
 ./run_ghidra.sh
 ```
 
-`run_ghidra.sh` importiert `GoodixMocSensorAdapter.dll`, lässt Ghidra
-analysieren und ruft `scratch/ghidra_dump_kdf.py` auf, das die acht
-SHA256-/HMAC-Funktionen (RVA 0x25580, 0x26630, **0x30bc0**, 0x324a2,
-**0x326a7**, 0x32a10, 0x34880, 0x34a26) als C nach **`kdf_decompiled.c`**
-schreibt. Die beiden fett markierten sind die Haupt­verdächtigen (PRF/HMAC).
+`run_ghidra.sh` imports `GoodixMocSensorAdapter.dll`, lets Ghidra
+analyze it, and calls `scratch/ghidra_dump_kdf.py`, which writes the eight
+SHA256/HMAC functions (RVA 0x25580, 0x26630, **0x30bc0**, 0x324a2,
+**0x326a7**, 0x32a10, 0x34880, 0x34a26) as C to **`kdf_decompiled.c`**.
+The two marked in bold are the prime suspects (PRF/HMAC).
 
-Aus `kdf_decompiled.c` lässt sich die Ableitung direkt ablesen und als Python
-nachbauen; `scratch/pcap_crypto.py --key <hex>` verifiziert sie sofort gegen die
-Captures. Danach ist der driver geradeaus fertigstellbar.
+From `kdf_decompiled.c` the derivation can be read directly and rebuilt as Python;
+`scratch/pcap_crypto.py --key <hex>` verifies it immediately against the
+captures. Afterwards, the driver can be straightforwardly completed.
 
-### Alle heute erstellten Tools (im Repo)
-| Datei | Zweck |
+### All tools created today (in the repo)
+| File | Purpose |
 |---|---|
-| `scratch/sdcp_replay.py` | Windows-Frames replayen, Responseen vergleichen |
+| `scratch/sdcp_replay.py` | Replay Windows frames, compare responses |
 | `scratch/moc_probe.py`, `win_order_probe.py` | a5 / sequence oracle probes |
-| `scratch/key_sweep.py`, `kdf_sweep.py` | ECDH-/KDF-Varianten am Sensor |
-| `scratch/pcap_crypto.py` | **Offline-Keyorakel** gegen alle Captures |
+| `scratch/key_sweep.py`, `kdf_sweep.py` | ECDH/KDF variants on the sensor |
+| `scratch/pcap_crypto.py` | **Offline key oracle** against all captures |
 | `scratch/re_tools/` | PE / pdata / pcapng parsers (objdump RE tools) |
-| `scratch/frida_kdf_dump.js` | KDF-Live-Dump (nur Windows) |
-| `run_ghidra.sh` + `scratch/ghidra_dump_kdf.py` | **KDF-Dekompilierung (Linux)** |
+| `scratch/frida_kdf_dump.js` | KDF live dump (Windows only) |
+| `run_ghidra.sh` + `scratch/ghidra_dump_kdf.py` | **KDF decompilation (Linux)** |
+### Incidental finding: IV reuse
+The driver reuses IVs multiple times (`goodix_unlock_success`: 29 of 50
+messages share an IV with another one). Several pairs are even
+**byte-identical** (same IV + same ciphertext = literally identical message
+sent twice). This is cryptographically sloppy, but doesn't help with the
+key, because the IV is sent in plaintext anyway.
+
+### New tool: `scratch/pcap_crypto.py`
+Standalone pcapng parser + decryption oracle. Loads all 159
+encrypted messages from the captures and checks a key candidate
+against two independent oracles (PKCS7 padding and HMAC-SHA256 over
+`01ff|len|IV|CT`). Self-test passed: Zero-Key → 0 false positives among 159
+messages, so the oracle is highly discriminatory.
+
+```bash
+python3 scratch/pcap_crypto.py                  # Overview
+python3 scratch/pcap_crypto.py --key <hex16>    # Test candidate
+# as library: from pcap_crypto import try_key, try_derivation
+```
+
+As soon as the derivation from Ghidra is known, this script verifies it in
+seconds against physical/real data — without hardware.
+
+### Clear recommendation: Ghidra now
+The black-box approach is exhausted. The target in `GoodixMocWbdi.dll`:
+
+1. **`gf_hmac_sha256`** — the string is located at offset 777912. From there,
+   trace back the callers: which buffer is passed as the key and
+   what is it generated from? This is the shortest path to the `mac_key`.
+2. **`mbedtls_ssl_psk_derive_premaster`** (String at ~0x3AF...) — shows how
+   the premaster is constructed (RFC 4279 or modified).
+3. **`mbedtls_ssl_derive_keys`** — Standard or patched?
+
+Ghidra + JDK are already in the project (`ghidra_11.0.3_PUBLIC/`, `jdk/`).
+
+### Honest overall assessment
+Transport, framing, and crypto suite are completely understood and implemented in
+executable Python tools. What's missing is the **one**
+key derivation function. It can no longer be guessed via black-box — it
+must be read from the binary. Without it, the Linux driver cannot
+generate a valid encrypted message, and thus cannot induce the MoC sensor to yield the
+Auth-Token. This is not a dead end, but the next stage is
+static reverse analysis, not further hardware probing.
+
+---
+
+## 19. Binary analysis + sister chip: the picture becomes complete (2026-07-28)
+
+### objdump instead of Ghidra
+Ghidra does not run in the sandbox (bundled JDK is Windows-only, system JDK is
+11, Ghidra 11 requires 17). Replacement: `objdump -b pei-x86-64` plus custom-
+written PE/.pdata parsers (`/tmp/pe.py`, `/tmp/pdata.py`, `/tmp/xref.py`).
+This provides exact function boundaries (2030 functions from `.pdata`) and
+RIP-relative Xrefs — sufficient for targeted analysis.
+
+### What the DLL reveals
+- `GoodixMocWbdi.dll` links **mbedTLS** statically, suite
+  **`TLS-PSK-WITH-AES-128-CBC-SHA256`** (Section 17).
+- The only caller of the `gf_hmac_sha256` wrapper is the function
+  **`ProcessPsk`** (VA 0x18008edc0) — this is the **PSK provisioning**, not
+  the session KDF. Strings there: `1.check psk if valid`, `3.write psk to mcu`,
+  `sgxPskLen`, `GfSealData`, `PresetPskWriteKey`, `production_write_key`.
+- The session KDF thus uses mbedTLS's own HMAC function, not the
+  Goodix wrapper — it is harder to isolate in the binary.
+
+### The sister chip provides the missing reference
+`goodix-fingerprint-reversing/capture.py` is a **working** driver
+for the Goodix 55a2 (GF3206) and was previously unnoticed. Key points that transfer directly
+to the GF3268:
+
+- **The TLS-PSK is Zero (32 null bytes).** Confirmed by the running
+  openssl line: `openssl s_server -nocert -psk 0000…0`. The 144-byte `PSK_WB`
+  is only a provisioning blob that is written to the MCU once —
+  it is **not** the session key. The same `ProcessPsk`/`PresetPsk`
+  functions are found in our GF3268 DLL.
+- **Role distribution:** the device is the TLS **client**, openssl is the
+  **`s_server`**. The natasha C driver and `test_get_image.py`, on the other hand,
+  use `s_client` or roll their own ECDH — **wrong role**.
+- **Flow/Sequence 55a2:** `d0` (REQUEST_TLS) → Device sends ClientHello →
+  to s_server → ServerHello back to device → Device sends
+  ClientKeyExchange+CCS+Finished → to Server → ServerFinished to device. Pure
+  standard TLS-PSK.
+
+### The GF3268 is not a pure 55a2
+Two hard differences in the captures:
+1. **Not a single TLS record marker** (`16 03 xx`, `14 03 03`) in the entire
+   USB traffic of all nine pcaps. The GF3268 packages the mbedTLS crypto into a
+   **custom** record format (`MAC32 | 01ff | len | IV | CT`), not in
+   standard TLS records. The s_server proxy trick of the 55a2 therefore does not
+   work unmodified.
+2. The GF3268 has a `d0` command whose response starts with `…0002 fe41 5050…`
+   (in `goodix_init` and `goodix_handshake_and_enroll`, **not** in
+   Unlock — the handshake is thus only performed once per power cycle and
+   then reused).
+
+### This makes the situation precise
+Everything is understood **except** the one key derivation from the
+handshake nonces. Facts:
+- Crypto = mbedTLS, `TLS-PSK-WITH-AES-128-CBC-SHA256`, **Zero-PSK** (now supported by
+  the 55a2 evidence, no longer just an assumption).
+- Standard TLS-PSK-KDF with Zero-PSK does not reproduce the session though
+  (`kdf_sweep.py`, 12 variants). Thus, an additional factor comes into play —
+  most likely the ECDHE portion (the Server Hello contains ephemeral
+  EC points), i.e., **ECDHE-PSK-Premaster** `Z || PSK structure`, but with a
+  nonce/seed assignment that has not been hit yet.
+
+### Two paths to the goal — decision required
+**A. Frida hook on Windows (fastest sure path).**
+Run the Windows driver and hook `mbedtls_ssl_derive_keys` or the
+AES setup function to dump `master_secret` / `key_block` **directly**.
+Inputs (Nonces, Z) are known from our live runs → the exact
+KDF formula results from a single input/output pair. `pcap_crypto.py`
+verifies it immediately. Prerequisite: Windows installation with the sensor.
+
+**B. Continue static RE (no Windows required, but tedious).**
+Read the mbedTLS handshake function completely in the binary. Without Ghidra/JDK17
+this is only feasible with objdump, but tedious. Requires an executable
+Ghidra (install JDK 17) or Radare2/Cutter as a replacement.
+
+Both lead to the same goal: once the KDF is known, the driver can be
+straightforwardly completed — transport, framing, command sequence and image
+decoding (from `capture.py`/`goodix5xx.c`) are already available.
+
+### Tools for this step (all offline, in the repo)
+- `/tmp` parsers are volatile; the persistent ones are located as `scratch/pcap_crypto.py`.
+- Recommendation: copy the PE/pdata/xref helpers to `scratch/` if the
+  RE is continued offline (see below, will be created).
+
+---
+
+## 20. Session crypto localized + Frida script ready (2026-07-28)
+
+### Important module breakdown (via objdump/Export analysis)
+- **`GoodixMocWbdi.dll`** — Algorithm/Templates (enrol*, identify*, template*,
+  preprocess*). Contains mbedTLS, but the HMAC wrappers (`gf_hmac_sha256`) are
+  only used there by `ProcessPsk` (PSK provisioning).
+- **`GoodixMocSensorAdapter.dll`** — **Transport adapter, this is where the
+  session crypto sits.** Contains the mbedTLS cipher strings `AES-128-CBC` … and the
+  SHA256 init constant in **8 functions** (SHA256 + HMAC layers).
+- `GoodixMocStorageAdapter.dll` — Template storage encryption (full
+  mbedTLS cipher list incl. GCM/CCM; irrelevant for the session).
+
+### AES is neither table-based nor AES-NI-based
+Neither AES S-Box nor AES-NI instructions in any DLL. mbedTLS is thus
+built with runtime-generated tables. The AES key is therefore statically
+unfindable via constant — but it originates anyway from the HMAC-SHA256-PRF,
+and **SHA256 is findable**. Therefore, the hook targets the SHA256/HMAC layer.
+
+### SHA256/HMAC functions in GoodixMocSensorAdapter.dll (RVA, image_base 0x180000000)
+```
+  0x25580 (266 B)    0x26630 (198 B)    0x30bc0 (1175 B, PRF candidate)
+  0x324a2 (125 B)    0x326a7 (612 B, HMAC candidate)   0x32a10 (237 B)
+  0x34880 (296 B)    0x34a26 (180 B)
+```
+
+### Deliverable: `scratch/frida_kdf_dump.js`
+Hooks these eight functions in **GoodixMocSensorAdapter.dll** and dumps their
+pointer arguments. The session KDF is a chain of HMAC-SHA256; in the trace,
+the `master_secret` step (Key = Zero-PSK structure) and the `key expansion`
+step (yields AES-Key ‖ HMAC-Key) are directly recognizable.
+
+**Flow/Sequence on Windows:**
+```
+pip install frida-tools
+frida-ps -ai                         # Find process with GoodixMocSensorAdapter.dll
+                                     # (Windows Hello = WbioSrvc service in svchost.exe)
+frida -p <PID> -l scratch/frida_kdf_dump.js
+# then trigger fingerprint Unlock/Enroll
+```
+Output: Console + `goodix_kdf_trace.txt`.
+
+**Fine-tuning:** If the mbedTLS one-shot HMAC is recognizable in the trace (6 arguments:
+md_info, key, keylen, in, ilen, out), enter its RVA in `HMAC_ONESHOT_RVA` —
+then Key/Data/MAC will be cleanly isolated and logged instead of heuristically.
+
+### Verification
+The dumped AES key is immediately verified:
+```
+python3 scratch/pcap_crypto.py --key <16-Byte-Hex>
+```
+If >50% cleanly decrypted messages, the KDF is cracked/broken and the
+Linux driver can replicate the derivation.
+
+### With this, the analysis is handed over completed
+All building blocks for a working driver are available and documented:
+Transport, framing (`MAC|01ff|len|IV|CT`), command sequence (Section 16),
+status codes (`01`=no match, `04`=not auth, 1110 B=Token), crypto suite,
+Zero-PSK, image decoding (`capture.py`/`goodix5xx.c`), as well as the RE tools
+(`scratch/re_tools/`, `scratch/pcap_crypto.py`) and the Frida extractor. The
+only remaining unknown — the exact KDF — becomes visible through the Frida trace
+on physical Windows hardware in a single run.
+
+---
+
+## 21. Offline paths exhausted — Ghidra package for the Linux machine (2026-07-28)
+
+### What else was tested and ruled out
+- **OTP as key:** `a6 00` (READ_OTP) yields 16 structured bytes, but
+  they are **not** an AES key (0-2/159 padding matches = chance). The value also
+  changes between captures (counter `0001`→`0002`); it is a **challenge**
+  that is mirrored back in the 1110-byte `a5` response (the `62 00 43 04 f5 …
+  c2b3231e…` pattern in both).
+- **Certificate-based keys:** SHA256(cert), SHA256(pubkey), HMAC(PSK,·),
+  all EC point windows and 786 sliding 16-byte windows from the
+  handshake material — **no match**.
+- **No plaintext handshake in the e3 channel:** Before the first encrypted
+  `e3 02 00`, there are only `d0` (Device Identity "RONGYAO/GM188…"), `d6`, `c0`
+  (MCU config), `e1`, `a6` (OTP). There is **no** visible nonce/key
+  exchange — the key derivation is purely in the driver, not on the wire.
+
+Conclusion: The session key **cannot** be reconstructed from the captures.
+It requires the KDF function from `GoodixMocSensorAdapter.dll`.
+
+### Why Frida doesn't apply here
+Frida would have to run **on Windows**, where the Goodix driver is active. On the
+Linux target machine, the Windows driver is not running. The `frida_kdf_dump.js`
+remains valid — but only if a Windows installation/VM with the sensor is
+available (the `goodix_vm_traffic.pcapng` suggests there used to be a VM).
+
+### Recommended path: Ghidra headless on the Linux machine
+Fully local, no Windows required. Ghidra is already in the project.
+
+```bash
+# 1. Install JDK 17 (CachyOS/Arch):
+sudo pacman -S jdk17-openjdk
+# 2. Start decompilation:
+./run_ghidra.sh
+```
+
+`run_ghidra.sh` imports `GoodixMocSensorAdapter.dll`, lets Ghidra
+analyze and calls `scratch/ghidra_dump_kdf.py`, which writes the eight
+SHA256/HMAC functions (RVA 0x25580, 0x26630, **0x30bc0**, 0x324a2,
+**0x326a7**, 0x32a10, 0x34880, 0x34a26) as C to **`kdf_decompiled.c`**.
+The two marked in bold are the primary suspects (PRF/HMAC).
+
+From `kdf_decompiled.c`, the derivation can be read directly and rebuilt as Python;
+`scratch/pcap_crypto.py --key <hex>` verifies it immediately against the
+captures. After that, the driver can be straightforwardly completed.
+
+### All tools created today (in repo)
+| File | Purpose |
+|---|---|
+| `scratch/sdcp_replay.py` | Replay Windows frames, compare responses |
+| `scratch/moc_probe.py`, `win_order_probe.py` | a5 / sequence oracle probes |
+| `scratch/key_sweep.py`, `kdf_sweep.py` | ECDH/KDF variants at the sensor |
+| `scratch/pcap_crypto.py` | **Offline key oracle** against all captures |
+| `scratch/re_tools/` | PE / pdata / pcapng parsers (objdump RE tools) |
+| `scratch/frida_kdf_dump.js` | KDF live dump (Windows only) |
+| `run_ghidra.sh` + `scratch/ghidra_dump_kdf.py` | **KDF decompilation (Linux)** |
 
 ---
 
 ## 22. BREAKTHROUGH: Session Crypto Fully Decompiled (2026-07-28)
 
-Ghidra headless lief auf `GoodixMocSensorAdapter.dll` (`kdf_decompiled.c`, 1007
-Zeilen). Die gesamte Encryption ist damit rekonstruiert.
+Ghidra headless ran on `GoodixMocSensorAdapter.dll` (`kdf_decompiled.c`, 1007
+lines). The entire encryption is thus reconstructed.
 
-### Paket-Encryption: `FUN_180030bc0`
-Baut exact das beobachtete Wire-Format. Ausgabe-Layout (Offsets in param_3):
+### Packet encryption: `FUN_180030bc0`
+Builds exactly the observed wire format. Output layout (Offsets in param_3):
 ```
-  +0x00  MAC (32 B, HMAC-SHA256, zuletzt berechnet)
+  +0x00  MAC (32 B, HMAC-SHA256, calculated last)
   +0x20  01 ff            (Marker)
   +0x22  plaintext_len    (4 B LE)
-  +0x26  IV (16 B)        <- NICHT zufällig: aus dem Klartext gehasht!
+  +0x26  IV (16 B)        <- NOT random: hashed from the plaintext!
   +0x36  AES-128-CBC(PKCS7(plaintext))
 ```
 Flow/Sequence:
-1. **IV** = HMAC-SHA256 über (`01ff` ‖ len ‖ plaintext ‖ 16×counter), erste 16 B.
-   → deshalb die beobachtete IV-Wiederverwendung bei gleichem Klartext.
-2. AES-Key + MAC-Key via KDF (siehe unten).
+1. **IV** = HMAC-SHA256 over (`01ff` ‖ len ‖ plaintext ‖ 16×counter), first 16 B.
+   → hence the observed IV reuse for identical plaintext.
+2. AES-Key + MAC-Key via KDF (see below).
 3. `FUN_180031600(ctx, keymat, 0x80)` = AES-128 setkey, `keymat[0:16]`.
-4. PKCS7-Pad, AES-128-CBC verschlüsseln.
-5. HMAC-SHA256 über (`01ff` ‖ len ‖ ciphertext) mit MAC-Key → MAC an +0x00.
+4. PKCS7-Pad, AES-128-CBC encrypt.
+5. HMAC-SHA256 over (`01ff` ‖ len ‖ ciphertext) with MAC-Key → MAC at +0x00.
 
-### Keyableitung: `FUN_1800325d0` = NIST SP 800-108 Counter-Mode-KDF
+### Key derivation: `FUN_1800325d0` = NIST SP 800-108 Counter-Mode-KDF
 ```
-  Für jeden 32-B-Block i (counter startet bei 1):
+  For each 32-B block i (counter starts at 1):
     block_i = HMAC-SHA256(KI,  BE32(i) ‖ Label ‖ Context ‖ BE32(L_in_bits))
-  Ausgabe = erste L Bytes der aneinandergehängten Blöcke.
+  Output = first L bytes of the concatenated blocks.
 ```
-- **KI** = 32-B-Master (aus `FUN_180034be0`, Herkunft = offene Frage, Runde 2).
+- **KI** = 32-B Master (from `FUN_180034be0`, origin = open question, round 2).
 - **Label**   = Bytes `6b676f6f6477697867 00` = `"kgoodwixg\0"` (10 B).
 - **Context** = Bytes `6b61656c72676e6f65726c6974686d` = `"kaelrgnoerlithm"` (15 B).
-  (verschleiertes „goodix" bzw. „kernel"+„algorithm"; **gehasht werden die
-  Literalbytes**, nicht die entschleierte Form.)
-- **L** = 0x30·8 = 384 Bit → 48 B Ausgabe: `[0:16]` = AES-Key, `[16:48]` = MAC-Key.
+  (obfuscated "goodix" or "kernel"+"algorithm"; **the literal bytes are hashed**, not the de-obfuscated form.)
+- **L** = 0x30·8 = 384 Bit → 48 B output: `[0:16]` = AES Key, `[16:48]` = MAC Key.
 
-### `FUN_180034880` = HMAC-SHA256-Init (bestätigt: Standard-HMAC, Key>64B wird gehasht)
+### `FUN_180034880` = HMAC-SHA256-Init (confirmed: standard HMAC, key>64B is hashed)
 
-### Was noch fehlt: der Master-Key KI
-`FUN_180034be0(local_c0)` füllt den 32-B-KI. Sein Aufrufbaum nutzt AES-setkey
-(0x31600) und SHA (0x32480) — sieht nach einem **Key-Unwrap** aus (staticer
-Key entpackt ein gespeichertes Blob?). Das entscheidet, ob KI
-**gerätestatic** (dann offline berechenbar) oder handshake-abhängig ist.
+### What's still missing: the Master Key KI
+`FUN_180034be0(local_c0)` populates the 32-B KI. Its call tree uses AES-setkey
+(0x31600) and SHA (0x32480) — looks like a **Key Unwrap** (static key unpacks a stored blob?). This determines whether KI is
+**device-static** (then calculable offline) or handshake-dependent.
 
-**Runde 2 läuft:** `scratch/ghidra_dump_kdf.py` zielt jetzt auf `FUN_180034be0`
-und seinen Aufrufbaum (0x34be0, 0x33960, 0x34720, 0x35790, 0x32940, 0x32280,
-0x31600). Ausgabe → `kdf_master.c`.
+**Round 2 is running:** `scratch/ghidra_dump_kdf.py` now targets `FUN_180034be0`
+and its call tree (0x34be0, 0x33960, 0x34720, 0x35790, 0x32940, 0x32280,
+0x31600). Output → `kdf_master.c`.
 
 ```bash
-./run_ghidra.sh      # erzeugt jetzt kdf_master.c
+./run_ghidra.sh      # now generates kdf_master.c
 ```
 
-Sobald KI geklärt ist, ist die komplette Encryption in Python nachbaubar
-und mit `scratch/pcap_crypto.py --key <hex>` sofort gegen die Captures
-verifizierbar. Der KDF-Nachbau (Format + SP800-108) steht schon; nur die
-KI-Quelle fehlt.
+As soon as KI is resolved, the complete encryption can be reimplemented in Python
+and immediately verified against the captures with `scratch/pcap_crypto.py --key <hex>`. The KDF reimplementation (Format + SP800-108) is already done; only the
+KI source is missing.
 
 ---
 
 ## 23. Master Key KI is an Obfuscated Constant — Extracted via Emulation (2026-07-28)
 
-### FUN_180034be0 ist ein White-Box-Konstanten-Generator
-`kdf_master.c` zeigt: `FUN_180034be0(out)` nimmt **keine** Eingabe. Es baut den
-32-Byte-KI aus bit-rotierten „Goodix"-Bytes, die durch AES/HMAC/CRC mit
-**hartcodierten** Keyn (`DAT_18004b2f0`, `DAT_18004b340`) laufen
-(`FUN_180032280` = AES-CMAC-artig, `FUN_180032940` = HMAC, `FUN_180034720` =
-CRC-32, Poly 0x04C11DB7). **KI ist damit eine fixed Konstante** — geräte- und
-session-independent. Folglich sind auch AES- und MAC-Key **fix** und
-entschlüsseln *alle* Captures.
+### FUN_180034be0 is a White-Box Constant Generator
+`kdf_master.c` shows: `FUN_180034be0(out)` takes **no** input. It builds the
+32-byte KI from bit-rotated "Goodix" bytes, which run through AES/HMAC/CRC with
+**hardcoded** keys (`DAT_18004b2f0`, `DAT_18004b340`)
+(`FUN_180032280` = AES-CMAC-like, `FUN_180032940` = HMAC, `FUN_180034720` =
+CRC-32, Poly 0x04C11DB7). **KI is thus a fixed constant** — device- and
+session-independent. Consequently, the AES and MAC keys are also **fixed** and
+decrypt *all* captures.
 
-Das erklärt rückblickend, warum kein Handshake-Material auf dem Draht nötig war:
-die Session ist von Anfang an mit einem im driver versteckten Konstant-Key
-verschlüsselt.
+Looking back, this explains why no handshake material was required on the wire:
+the session is encrypted from the very beginning with a constant key hidden in the driver.
 
-### KDF verifiziert
-Der Python-Nachbau der SP800-108-KDF stimmt Byte für Byte mit dem Dekompilat:
+### KDF verified
+The Python reimplementation of the SP800-108 KDF matches the decompiled code byte by byte:
 ```python
 label, context, L = b"kgoodwixg\x00", b"kaelrgnoerlithm", 48
 block_i = HMAC_SHA256(KI, BE32(i) + label + context + BE32(L*8))
 keyblock = (block_1 || block_2)[:48]
 aes_key, mac_key = keyblock[:16], keyblock[16:48]
 ```
-Sobald KI vorliegt, sind die Keys damit ohne weitere RE bestimmt.
+Once KI is available, the keys are determined without any further RE.
 
-### `scratch/emulate_ki.py` — KI per Emulation
-Statt die Obfuskation nachzubauen, führt das Skript die Original-Funktionen
-mit **Unicorn** aus (malloc/free gehookt, Stack-Cookie gestubbt, alle Sektionen
-gemappt): `FUN_180034be0` → KI, dann `FUN_1800325d0` → 48-Byte-Keyblock. Es
-vergleicht Emulator- und Python-KDF und verifiziert die Keys sofort gegen die
-Captures via `pcap_crypto.py`.
+### `scratch/emulate_ki.py` — KI via Emulation
+Instead of reimplementing the obfuscation, the script executes the original functions
+with **Unicorn** (malloc/free hooked, stack cookie stubbed, all sections
+mapped): `FUN_180034be0` → KI, then `FUN_1800325d0` → 48-byte keyblock. It
+compares the emulator and Python KDF and immediately verifies the keys against the
+captures via `pcap_crypto.py`.
 
 ```bash
-# Unicorn installieren:
+# Install Unicorn:
 sudo pacman -S python-unicorn        # CachyOS/Arch
-#   oder:  python3 -m pip install --user unicorn
+#   or:  python3 -m pip install --user unicorn
 python3 scratch/emulate_ki.py
 ```
 
-Erwartete Ausgabe: `KI`, `AES-128-Key`, `HMAC-Key`, „Python-KDF stimmt überein:
-True", und „*** TREFFER — die Keys entschlüsseln die physical/real Captures! ***".
+Expected output: `KI`, `AES-128 Key`, `HMAC Key`, "Python KDF matches:
+True", and "*** MATCH — the keys decrypt the physical/real captures! ***".
 
-### Danach ist der driver fertigstellbar
-Mit den fixed Keys steht die komplette Encryption:
-- **Verschlüsseln** (Host→Sensor): IV = HMAC-SHA256(01ff‖len‖plaintext‖16×ctr)[:16],
+### Afterwards, the driver can be completed
+With the fixed keys, the complete encryption is in place:
+- **Encrypt** (Host→Sensor): IV = HMAC-SHA256(01ff‖len‖plaintext‖16×ctr)[:16],
   AES-128-CBC(PKCS7(plaintext)), MAC = HMAC-SHA256(01ff‖len‖CT).
-- **Entschlüsseln** (Sensor→Host): AES-128-CBC-Decrypt mit IV aus dem Paket,
-  MAC prüfen.
-Das ersetzt den `openssl s_client`-Subprozess im C-driver complete durch
-wenige Zeilen mbedTLS/Python-Krypto. Kommandosequenz, Framing, Statuscodes und
-Bild-Dekodierung liegen bereits vor (Sections 16, 22).
+- **Decrypt** (Sensor→Host): AES-128-CBC decrypt with IV from the packet,
+  verify MAC.
+This replaces the `openssl s_client` subprocess in the C driver entirely with
+a few lines of mbedTLS/Python crypto. The command sequence, framing, status codes, and
+image decoding are already available (Sections 16, 22).
 
 ---
 
 ## 24. ✅ SESSION CRYPTO FULLY BROKEN (2026-07-28)
 
 `scratch/emulate_ki.py` executed Unicorn emulation to extract Master Key KI, compute
-KDF gerechnet und die Keys gegen **alle 159** mitgeschnittenen Nachrichten
-verifiziert:
+KDF and verified the keys against **all 159** captured messages:
 
 ```
   AES 159/159 valid padding   +   HMAC 159/159   =   Crypto 100% Correct
@@ -1218,16 +1458,16 @@ verifiziert:
   AES_KEY = <AES_128_SESSION_KEY_16B_PLACEHOLDER>                       (AES-128-CBC)
   MAC_KEY = <MAC_KEY_PART1> <MAC_KEY_PART2>
 ```
-- KI = `FUN_180034be0()` ‖ `FUN_180033960()` (zwei obfuskierte 16-B-Konstanten,
-  Stack-benachbart → 32 B). Extracted via binary emulation, not guessed.
+- KI = `FUN_180034be0()` ‖ `FUN_180033960()` (two obfuscated 16-B constants,
+  stack-adjacent → 32 B). Extracted via binary emulation, not guessed.
 - `AES_KEY, MAC_KEY = SP800-108-KDF(KI, "kgoodwixg\0", "kaelrgnoerlithm", 384bit)`.
 
 ### Verified Wire Format (Inner e3 Payload)
 ```
   MAC(32) || 01 ff || plaintext_len(LE32) || IV(16) || AES-128-CBC(PKCS7(plaintext))
   MAC = HMAC-SHA256(MAC_KEY, 01ff || plaintext_len(LE32) || ciphertext)   [159/159]
-  IV  = SHA256(01ff||len||plaintext||16×BE32(3))[:16]  beim Senden;
-        Receiver nutzt den Paket-IV (IV ist nicht im MAC → beliebiger IV zulässig)
+  IV  = SHA256(01ff||len||plaintext||16×BE32(3))[:16]  when sending;
+        Receiver uses the packet IV (IV is not in MAC → arbitrary IV permitted)
 ```
 
 ### New Reference Module: `goodix_crypto.py`
@@ -1246,18 +1486,18 @@ Outer transport encryption is fully resolved; inner SDCP protocol layer
 is **readable in plaintext** and can be implemented step-by-step —
 overcoming what section 6 of `walkthrough.md` called the final boss.
 
-### Status für den driver
-| Baustein | Status |
+### Status for the driver
+| Component | Status |
 |---|---|
-| USB-Transport, Paket-Framing, CRCs | ✅ (C-driver + Python) |
-| Kommandosequenz, Statuscodes | ✅ (Section 16) |
-| **Session-Encryption** | ✅ **resolved** (`goodix_crypto.py`) |
-| Innere SDCP-Schicht (ECDH/Token) | ⏳ jetzt entschlüsselbar, Nachbau offen |
-| Bild-/Template-Dekodierung | teils (5xx-Code + `capture.py`) |
+| USB transport, packet framing, CRCs | ✅ (C driver + Python) |
+| Command sequence, status codes | ✅ (Section 16) |
+| **Session encryption** | ✅ **resolved** (`goodix_crypto.py`) |
+| Inner SDCP layer (ECDH/Token) | ⏳ now decryptable, reimplementation pending |
+| Image/template decoding | partial (5xx code + `capture.py`) |
 
-Nächster Step: die entschlüsselte SDCP-Sequenz aus den pcaps complete
-kartieren (Client/Server-ECDH, Identity, Enroll/Verify-Token) und im driver
-nachbilden. Der schwierigste Teil — der undurchsichtige Transport — ist resolved.
+Next step: map the decrypted SDCP sequence from the pcaps completely
+(Client/Server-ECDH, Identity, Enroll/Verify-Token) and reproduce it in the driver.
+The most difficult part — the opaque transport — is resolved.
 
 ---
 
@@ -1301,23 +1541,23 @@ Wire Format (Inner e3 Payload):
 | `scratch/pcap_crypto.py` | Offline crypto oracle against pcap captures | All platforms |
 | `scratch/sdcp_replay.py` | Replay & compare Windows USB frames | Physical Sensor Hardware |
 | `scratch/moc_probe.py`, `win_order_probe.py` | a5 / sequence oracle probes | Physical Sensor Hardware |
-| `scratch/key_sweep.py`, `kdf_sweep.py` | (historisch) KDF-Varianten am Sensor | Physical Sensor Hardware |
-| `scratch/frida_kdf_dump.js` | (Alternativweg) KDF live dumpen | Windows + Frida |
+| `scratch/key_sweep.py`, `kdf_sweep.py` | (historical) KDF variants on the sensor | Physical Sensor Hardware |
+| `scratch/frida_kdf_dump.js` | (Alternative path) KDF live dump | Windows + Frida |
 | `scratch/re_tools/` | PE / pdata / pcapng parsers (objdump RE tools) | All platforms |
 | `run_ghidra.sh` + `scratch/ghidra_dump_kdf.py` | Decompile DLL crypto functions | Linux + JDK17 |
 | `kdf_decompiled.c`, `kdf_master.c` | Decompiled C code of crypto/KDF functions | — |
 | `run_enroll_test.sh` | Build C driver & test against physical sensor | Physical Sensor Hardware |
 | `HANDOVER_COWORK.md` | **This document** | — |
 
-Nicht im Git (siehe `.gitignore`): `ghidra_11.0.3_PUBLIC/`, `jdk/`,
-`ghidra_headless_proj/`, `*.pcapng`, `*.bin`, `*.log`, Emulations-Ausgaben.
+Not in Git (see `.gitignore`): `ghidra_11.0.3_PUBLIC/`, `jdk/`,
+`ghidra_headless_proj/`, `*.pcapng`, `*.bin`, `*.log`, Emulation outputs.
 
 ## 25.4 Reproduction of Cryptographic Break (Linux-Only)
 ```bash
 sudo pacman -S jdk17-openjdk python-unicorn      # Prerequisites
 ./run_ghidra.sh                                  # decompiles -> kdf_master.c
 python3 scratch/emulate_ki.py                    # KI -> Keys -> 159/159 packet validation
-python3 scratch/goodix_crypto.py                 # Self-test der Reference Crypto Implementation
+python3 scratch/goodix_crypto.py                 # Self-test of the Reference Crypto Implementation
 ```
 
 ## 25.5 Steps to Production Driver
@@ -1356,7 +1596,7 @@ Tool: `scratch/decode_protocol.py <capture.pcapng>`. Decrypted output stored in
   host ECDH public key (refreshed per session).
 - **SDCP ServerHello** (1366 B): `71 04 00 00 ‖ Certificate(847=sensor_cert.der)
   ‖ Server EC Point ‖ Signature`.
-- **SDCP-Identity** (32 B → 33 B Response): HMAC-Token über den Transcript.
+- **SDCP-Identity** (32 B → 33 B Response): HMAC-Token over the transcript.
 
 ## 26.2 Enroll Flow (Decrypted from `goodix_handshake_and_enroll`)
 ```
@@ -1385,8 +1625,7 @@ Complete USB transport (Bulk transfers, Goodix framing with CRC8/CRC32/64-byte p
 framing validated 12/12 against captured traffic) + integrated session crypto.
 Provides `send()/recv()` (plaintext framing) and `send_enc()/recv_enc()`
 (encrypted e3 transport channel). Includes `verify_crypto_live()`: transmits
-inneren e3 und entschlüsselt die Sensor-Response — **End-to-End-Beweis auf der
-Hardware**.
+inner e3 and decrypts the sensor response — **End-to-End proof on the hardware**.
 
 ```bash
 sudo python3 scratch/goodix_gf3268.py
@@ -1398,858 +1637,857 @@ confirming complete pipeline (USB → Framing → Crypto) on physical hardware.
 **Resolved & Operational:** USB transport, packet framing, session encryption,
 command landscape, enroll/verify protocol framing identified.
 
-**Noch offen für vollen Enroll/Verify:** die innere SDCP-Schicht. Zwei Wege:
-1. **SDCP umgehen (bevorzugt):** Prüfen, ob der Sensor `a1`/`a0`-Enroll und
-   `a5`-Verify auch mit einem *Dummy*- oder *ohne* vollständigen SDCP-Handshake
-   ausführt. Das ist jetzt mit `goodix_gf3268.py` direkt an der Hardware
-   testbar. Wenn ja, ist ein libfprint-driver ohne Krypto-Attestierung möglich.
-2. **SDCP nachbauen:** ephemeres ECDH (P-256) + die SDCP-KDF (weitere kleine
-   RE-Aufgabe in `GoodixMocSensorAdapter.dll`, analog zur schon gelösten
-   Transport-KDF) + Identity-Token. Nötig nur, falls der Sensor SDCP erzwingt.
+**Still open for full Enroll/Verify:** the inner SDCP layer. Two paths:
+**Still open for full Enroll/Verify:** the inner SDCP layer. Two approaches:
+1. **Bypass SDCP (preferred):** Check whether the sensor executes `a1`/`a0`-Enroll and
+   `a5`-Verify with a *dummy* or *without* a complete SDCP handshake.
+   This can now be tested directly on the hardware with `goodix_gf3268.py`.
+   If yes, a libfprint driver without crypto attestation is possible.
+2. **Reimplement SDCP:** ephemeral ECDH (P-256) + the SDCP KDF (another small
+   RE task in `GoodixMocSensorAdapter.dll`, analogous to the already resolved
+   transport KDF) + identity token. Only necessary if the sensor enforces SDCP.
 
-Der jahrelange Hauptblocker — die undurchsichtige Transportverschlüsselung — ist
-resolved. Enroll/Verify ist jetzt ein klar umrissenes, an der Hardware testbares
-Problem statt einer Blackbox.
+The main blocker for years — the opaque transport encryption — is
+resolved. Enroll/Verify is now a clearly defined problem testable on the hardware,
+instead of a blackbox.
 
 ---
 
-# 27. ✅ HARDWARE-BESTÄTIGUNG: Transport+Krypto laufen end-to-end (2026-07-29)
+# 27. ✅ HARDWARE CONFIRMATION: Transport+Crypto run end-to-end (2026-07-29)
 
-`sudo python3 scratch/goodix_gf3268.py` auf dem physical/real GF3268:
+`sudo python3 scratch/goodix_gf3268.py` on the physical/real GF3268:
 ```
-  Interface 0 beansprucht. Sensor bereit.
-  --- Init-Sequenz ---   e1 04 -> 00000000
-  --- Krypto-Kanal live verifizieren ---
+  Interface 0 claimed. Sensor ready.
+  --- Init Sequence ---   e1 04 -> 00000000
+  --- Verify crypto channel live ---
      e3 02 -> Status/Len: 004f030000
-     e3 00 -> 1366 B entschlüsselt: 710400003082034b308202f1a0030201…
-  *** ERFOLG: Sensor-Certificate live entschlüsselt ***
+     e3 00 -> 1366 B decrypted: 710400003082034b308202f1a0030201…
+  *** SUCCESS: Sensor certificate decrypted live ***
 ```
-Damit ist die komplette Kette **auf der Hardware** bewiesen: USB-Bulk →
-Goodix-Framing (CRC8/CRC32/64B-Padding) → Session-Encryption (fixed Keys)
-→ Decryption der 1366-B-Sensorantwort (Certificates-Flight). Der Sensor
-akzeptiert die fixed Keys ohne jeden Handshake.
+This proves the complete chain **on the hardware**: USB bulk →
+Goodix framing (CRC8/CRC32/64B padding) → Session encryption (fixed keys)
+→ Decryption of the 1366-B sensor response (certificates flight). The sensor
+accepts the fixed keys without any handshake.
 
-Behobene Startfehler: fehlende ctypes-`argtypes` (64-Bit-Zeiger-Kürzung) und ein
-`log()`-Aufruf. `goodix_gf3268.py` läuft jetzt sauber.
+Fixed startup errors: missing ctypes `argtypes` (64-bit pointer truncation) and a
+`log()` call. `goodix_gf3268.py` now runs cleanly.
 
-## 27.1 Nächstes Experiment: Fingerdaten live lesen
+## 27.1 Next Experiment: Reading finger data live
 ```bash
-sudo systemctl stop fprintd        # Interface freigeben
+sudo systemctl stop fprintd        # Free the interface
 sudo python3 scratch/goodix_gf3268.py finger
 ```
-Der `finger`-Modus pollt 20 s lang `a2 00 00` (Wait-Finger) und `b0 02`
-(Kalibrier-/Sensorwerte) und zeigt Änderungen an. Beim Auflegen/Abheben des
-Fingers sollten sich die Werte sichtbar ändern → Beleg, dass wir Fingerpräsenz
-und Sensorwerte live lesen können (Grundlage für Verify).
+The `finger` mode polls `a2 00 00` (wait finger) and `b0 02`
+(calibration/sensor values) for 20 s and displays changes. When placing/lifting the
+finger, the values should change visibly → Proof that we can read finger presence
+and sensor values live (foundation for Verify).
 
-## 27.2 Fahrplan zum vollständigen Enroll/Verify
-1. **Finger-Probe** (oben): bestätigen, dass a2/b0 auf Fingerkontakt reagieren.
-2. **Verify ohne SDCP testen:** `a5 00 00` mit 32-B-Wert senden, prüfen ob der
-   Sensor 1110 B (Match) / 0x01 (kein Match) liefert — auch ohne gültige
-   innere SDCP-Session. Falls ja: Verify gegen Windows-Templates möglich.
-3. **Falls SDCP erzwungen:** die innere SDCP-KDF in GoodixMocSensorAdapter.dll
-   reversen (gleiche Methode wie bei der schon gelösten Transport-KDF:
-   Ghidra-Dekompilat + ggf. Unicorn-Emulation) und ECDH P-256 + Identity-Token
-   nachbauen.
-4. **Enroll:** `a1 00 00` (begin) → `a0 00 00` (Sample, Progresss-Feedback)
+## 27.2 Roadmap to full Enroll/Verify
+1. **Finger probe** (above): confirm that a2/b0 react to finger contact.
+2. **Test Verify without SDCP:** send `a5 00 00` with a 32-B value, check if the
+   sensor returns 1110 B (Match) / 0x01 (No Match) — even without a valid
+   inner SDCP session. If yes: Verify against Windows templates is possible.
+3. **If SDCP is enforced:** reverse the inner SDCP KDF in GoodixMocSensorAdapter.dll
+   (same method as with the already resolved transport KDF:
+   Ghidra decompilation + optionally Unicorn emulation) and reimplement ECDH P-256 +
+   Identity token.
+4. **Enroll:** `a1 00 00` (begin) → `a0 00 00` (sample, progress feedback)
    ×N → `a3/a4` (commit); Template on-chip.
-5. **libfprint-Integration:** die bewährte Kommandofolge + `goodix_crypto` in
-   den C-driver übernehmen (ersetzt den openssl-Subprozess complete).
+5. **libfprint Integration:** port the proven command sequence + `goodix_crypto` into
+   the C driver (replaces the openssl subprocess completely).
 
 ---
 
-# 28. ✅✅ VERIFY FUNKTIONIERT AUF HARDWARE — OHNE SDCP (2026-07-29)
+# 28. ✅✅ VERIFY WORKS ON HARDWARE — WITHOUT SDCP (2026-07-29)
 
-`sudo python3 scratch/goodix_gf3268.py verify` mit enrolltem Finger:
+`sudo python3 scratch/goodix_gf3268.py verify` with enrolled finger:
 ```
-   a2=005a64001f003800  a5-> 1110 B  *** MATCH-TOKEN! ***
+   a2=005a64001f003800  a5-> 1110 B  *** MATCH TOKEN! ***
         005a64470000000062004304f500cd00cc0fe95f7fcf760503889a36c8e6…
 ```
 
-**Der Sensor macht den Match-on-Chip und liefert das 1110-B-Token — ganz ohne
-gültige innere SDCP-Session.** Nötig war nur: Transportkrypto (fixed Keys) +
-Vorsequenz (`b0 02`, `e0 01`, `a2 00 00`) + `a5 00 00` mit 32-B-Zufalls-Challenge.
+**The sensor performs the Match-on-Chip and returns the 1110-B token — entirely without
+a valid inner SDCP session.** The only things required were: transport crypto (fixed keys) +
+pre-sequence (`b0 02`, `e0 01`, `a2 00 00`) + `a5 00 00` with a 32-B random challenge.
 
-### Das ist der Breakthrough für einen lauffähigen Verify-driver
-- `a5 00 00` Response **1110 B = Match**, **0x01 = kein Match** (verifiziert).
-- Kein ECDH, kein SDCP-Identity-Token, keine Attestierung nötig.
+### This is the breakthrough for a working Verify driver
+- `a5 00 00` Response **1110 B = Match**, **0x01 = No Match** (verified).
+- No ECDH, no SDCP identity token, no attestation necessary.
 
-### Struktur des Match-Tokens (1110 B, aus 10 Captures analysiert)
+### Structure of the Match Token (1110 B, analyzed from 10 captures)
 ```
   [  0]      Status 00
-  [1:3]      Finger-Region (z.B. 5a64, = a2-Region)
-  [3]        Zähler
-  [4:112]    108 B  STATISCH über Matches  -> Template-/Geräte-Identität
-                    (enthält 62004304f5 = OTP). Unterscheidet die enrollten
-                    Finger -> Grundlage für IDENTIFY.
-  [112:144]  32 B   wechselt  -> Match-Nonce
+  [1:3]      Finger region (e.g., 5a64, = a2 region)
+  [3]        Counter
+  [4:112]    108 B  STATIC across matches  -> Template/device identity
+                    (contains 62004304f5 = OTP). Differentiates enrolled
+                    fingers -> Foundation for IDENTIFY.
+  [112:144]  32 B   changes   -> Match nonce
   [144:150]  6 B    static
-  [150:1110] 960 B  wechselt  -> SDCP-Signatur/Attestierung (für Linux irrelevant)
+  [150:1110] 960 B  changes   -> SDCP signature/attestation (irrelevant for Linux)
 ```
-Für libfprint genügt: 1110 B = Match, `[4:112]` identifiziert den Finger.
+Sufficient for libfprint: 1110 B = Match, `[4:112]` identifies the finger.
 
-### Damit ist der Status
-| Funktion | Status |
+### Thus the status is
+| Function | Status |
 |---|---|
-| USB-Transport + Framing | ✅ Hardware |
-| Session-Encryption | ✅ Hardware |
-| Fingererkennung (a2/b0) | ✅ Hardware |
-| **Verify / Match-on-Chip** | ✅ **Hardware, ohne SDCP** |
-| Enroll (a1/a0/a3/a4) | ⏳ als Nächstes testen |
-| libfprint-Integration | offen (Kommandofolge steht) |
+| USB transport + Framing | ✅ Hardware |
+| Session encryption | ✅ Hardware |
+| Finger detection (a2/b0) | ✅ Hardware |
+| **Verify / Match-on-Chip** | ✅ **Hardware, without SDCP** |
+| Enroll (a1/a0/a3/a4) | ⏳ test next |
+| libfprint integration | open (command sequence established) |
 
-Nur noch Enroll fehlt für einen vollständigen driver — und die Enroll-commands
-(`a1` begin, `a0` sample mit Progress, `a3/a4` commit) sind bereits
-identifiziert und werden als Nächstes an der Hardware tested.
+Only Enroll is missing for a complete driver — and the Enroll commands
+(`a1` begin, `a0` sample with progress, `a3/a4` commit) are already
+identified and will be tested on the hardware next.
 
 ---
 
-# 29. Verify rigoros bestätigt (Positiv- + Negativtest, 2026-07-29)
+# 29. Verify rigorously confirmed (Positive + Negative Test, 2026-07-29)
 
-Kontrolltest auf echter Hardware:
-- **Enrollter Finger** → `a5 -> 1110 B  *** MATCH-TOKEN ***`
-- **Nicht-enrollter Finger** → durchgehend `a5 -> 01 (kein Match)`
+Control test on real hardware:
+- **Enrolled finger** → `a5 -> 1110 B  *** MATCH TOKEN ***`
+- **Non-enrolled finger** → consistently `a5 -> 01 (No Match)`
 
-Damit ist zweifelsfrei belegt: der Sensor führt einen **physical/real Match-on-Chip**
-aus, und `01` vs `1110 B` ist das reale Result (nicht bloß Fingerpräsenz).
-**Verify ist damit complete und wissenschaftlich sauber verifiziert.**
+This unequivocally proves: the sensor executes a **physical/real Match-on-Chip**,
+and `01` vs `1110 B` is the real result (not just finger presence).
+**Verify is thus complete and scientifically properly verified.**
 
-Robustheitsfix: `Device._drain()` verwirft beim Start liegengebliebene IN-Pakete
-einer Vorsession — behebt das „erster Run hakt"-Verhalten.
+Robustness fix: `Device._drain()` discards IN packets left over from a previous session
+during startup — fixes the "first run hangs" behavior.
 
-## 29.1 Nächster Step: Enroll (Trockenlauf)
+## 29.1 Next step: Enroll (dry run)
 ```bash
 sudo systemctl stop fprintd
 sudo python3 scratch/goodix_gf3268.py enroll
 ```
-Der `enroll`-Modus macht Setup (`a6` OTP → `a7` → `a1` begin) und die
-`a0`-Sample-Schleife mit Progresss-Anzeige — **ohne `a4`-Commit**, es wird
-also **kein Template gespeichert** und der Sensor bleibt unverändert. Finger
-wiederholt leicht versetzt auflegen. Steigt `Byte1` der `a0`-Response Direction
-`0x64` (100 %), läuft Enroll ohne SDCP und wir ergänzen den Commit (`a3`/`a4`)
-für echtes Speichern.
+The `enroll` mode does setup (`a6` OTP → `a7` → `a1` begin) and the
+`a0` sample loop with progress display — **without `a4` commit**, meaning
+**no template is saved** and the sensor remains unmodified. Place finger repeatedly,
+slightly shifted. If `Byte1` of the `a0` response Direction reaches `0x64` (100%),
+Enroll runs without SDCP and we will add the commit (`a3`/`a4`)
+for actual saving.
 
 ---
 
-# 30. Enroll-Befund: braucht gültiges SDCP; Verify nicht (2026-07-29)
+# 30. Enroll finding: needs valid SDCP; Verify does not (2026-07-29)
 
-Hardware-Tests des `enroll`-Trockenlaufs (mehrere Durchläufe):
-- `a1 00` (begin) liefert stets `00…` (33 B) = **Erfolg**.
-- Frame-Erfassung läuft: `a2 00 00 000f4101` liefert wechselnde Finger-Regionen
-  (`585a`, `5d5e`, `565b`, `4d56`, `5350` …) — das Sampling funktioniert.
-- **`a0 00 00` gibt aber durchweg `000000`** = Frame akzeptiert, **aber nicht
-  angerechnet**. Auch **mit** vorangestelltem `e3 01`-Identity-Step (Dummy-32 B)
-  bleibt der Progress bei 0.
+Hardware tests of the `enroll` dry run (multiple iterations):
+- `a1 00` (begin) always returns `00…` (33 B) = **Success**.
+- Frame capture is running: `a2 00 00 000f4101` returns changing finger regions
+  (`585a`, `5d5e`, `565b`, `4d56`, `5350` …) — sampling works.
+- **`a0 00 00` consistently returns `000000`** = Frame accepted, **but not
+  counted**. Even **with** a preceding `e3 01` identity step (dummy 32 B),
+  the progress remains at 0.
 
-**Schlussfolgerung:** Enroll rechnet ein Sample nur an, wenn die `e3 01`-SDCP-
-Identity **inhaltlich gültig** ist (nicht nur transportiert). Eine Zufalls-
-Identity genügt nicht. Verify dagegen liefert das Match-Token unabhängig von der
-SDCP-Identity — deshalb funktioniert Verify complete, Enroll (noch) nicht.
+**Conclusion:** Enroll only counts a sample if the `e3 01` SDCP identity
+is **content-wise valid** (not just transported). A random identity is not enough.
+Verify, on the other hand, returns the match token regardless of the
+SDCP identity — which is why Verify is complete, but Enroll is not (yet).
 
-## 30.1 Klare Statustabelle
-| Funktion | Ohne SDCP | Status |
+## 30.1 Clear Status Table
+| Function | Without SDCP | Status |
 |---|---|---|
-| Transport/Krypto/Framing | — | ✅ Hardware |
-| Fingererkennung (a2/b0) | ✅ | ✅ Hardware |
-| **Verify / Match-on-Chip** | ✅ **ja** | ✅ **funktioniert (Match vs. 01)** |
-| **Enroll (a0 Anrechnung)** | ❌ **nein** | ⏳ braucht gültige SDCP-Identity |
+| Transport/Crypto/Framing | — | ✅ Hardware |
+| Finger detection (a2/b0) | ✅ | ✅ Hardware |
+| **Verify / Match-on-Chip** | ✅ **yes** | ✅ **works (Match vs. 01)** |
+| **Enroll (a0 counting)** | ❌ **no** | ⏳ requires valid SDCP identity |
 
-## 30.2 Zwei Wege für Enroll
-1. **SDCP nachbauen (der saubere Weg):** die innere Schicht in
-   GoodixMocSensorAdapter.dll reversen — ECDH P-256 (ClientHello:
-   nonce(32)+EC(65)+EC(65)) + die SDCP-Key-/Identity-KDF. Methodik ist
-   identisch zur bereits gelösten Transport-KDF: Ghidra-Dekompilat der SDCP-
-   Funktionen + ggf. Unicorn-Emulation, dann Identity-Token pro Sample berechnen.
-   Danach ist Enroll complete.
-2. **Pragmatisch (sofort nutzbar):** In Windows enrollen, unter Linux nur
-   verifizieren. Da Verify gegen die vorhandenen Templates funktioniert, ist ein
-   Unlock-Only-Betrieb (Dual-Boot) bereits jetzt möglich.
+## 30.2 Two paths for Enroll
+1. **Reimplement SDCP (the clean way):** reverse the inner layer in
+   GoodixMocSensorAdapter.dll — ECDH P-256 (ClientHello:
+   nonce(32)+EC(65)+EC(65)) + the SDCP key/identity KDF. Methodology is
+   identical to the already resolved transport KDF: Ghidra decompilation of the SDCP
+   functions + optionally Unicorn emulation, then compute identity token per sample.
+   After that, Enroll is complete.
+2. **Pragmatic (immediately usable):** Enroll in Windows, only verify under Linux.
+   Since Verify works against existing templates, an Unlock-Only mode (dual-boot)
+   is already possible now.
 
-Robustheit: `_bulk_out` setzt bei Stall den Endpunkt zurück und wiederholt; die
-Sample-Schleife fängt USB-Stalls ab und läuft weiter (die `-1/-4`-Abbrüche der
-ersten Runs treten dadurch nicht mehr auf).
+Robustness: `_bulk_out` resets the endpoint on stall and retries; the
+sample loop catches USB stalls and continues (the `-1/-4` aborts from the
+first runs no longer occur).
 
-## 30.3 Nächster konkreter Step (falls Enroll gewünscht)
-SDCP-Funktionen in `GoodixMocSensorAdapter.dll` lokalisieren und dekompilieren
-(gleiche Tools: `run_ghidra.sh`, `scratch/re_tools/`, `scratch/emulate_ki.py`).
-Einstieg: die e3-01-Identity-Erzeugung und die ECDH-Verarbeitung des
-ServerHello (Certificate + Server-EC-Punkt) im Binär rückverfolgen.
+## 30.3 Next concrete step (if Enroll is desired)
+Locate and decompile SDCP functions in `GoodixMocSensorAdapter.dll`
+(same tools: `run_ghidra.sh`, `scratch/re_tools/`, `scratch/emulate_ki.py`).
+Entry point: trace back the e3-01 identity generation and the ECDH processing of the
+ServerHello (Certificate + Server EC Point) in the binary.
 
 ---
 
-# 31. SDCP-Keyschema complete decompiles (2026-07-29)
+# 31. SDCP key scheme completely decompiled (2026-07-29)
 
-Sechs Ghidra-Runden auf GoodixMocSensorAdapter.dll haben die komplette
-Host-Seite der SDCP-Schicht offengelegt (Quellpfad im Binär:
-`…\GoodixSdcp\GoodixSdcpCmd.cpp`). Die Krypto folgt dem Microsoft-SDCP-Schema.
+Six Ghidra rounds on GoodixMocSensorAdapter.dll have revealed the complete
+host side of the SDCP layer (source path in binary:
+`…\GoodixSdcp\GoodixSdcpCmd.cpp`). The crypto follows the Microsoft SDCP scheme.
 
-## 31.1 Funktions-Landkarte (RVA in GoodixMocSensorAdapter.dll)
+## 31.1 Function map (RVA in GoodixMocSensorAdapter.dll)
 ```
-  0x7050   GoodixSdcpConnectSecure   Haupt-Connect
+  0x7050   GoodixSdcpConnectSecure   Main Connect
   0xf020   host generate connect params  -> ClientHello (nonce + EC + EC)
-  0x12040  sdcpcli_keygen            ephemeres P-256-Keypair (pub 65B @+0, priv 32B @+0x41)
-  0x113e0  sdcpcli_gen_rand          DRBG (Personalisierung "sdcpcli_gen_rand")
-  0x10320  parse_connect_data        ServerHello parsen + ECDH + Keys + MAC-Check
-  0x10c30    +-> ECDH-Keymaterial    (server_pub, client_priv, nonces)
-  0x10ef0    |     FUN: ECDH-Punktmult (P-256)
-  0x10bd0    +-> Session-Keys        (application keys)
+  0x12040  sdcpcli_keygen            ephemeral P-256 keypair (pub 65B @+0, priv 32B @+0x41)
+  0x113e0  sdcpcli_gen_rand          DRBG (Personalization "sdcpcli_gen_rand")
+  0x10320  parse_connect_data        Parse ServerHello + ECDH + Keys + MAC Check
+  0x10c30    +-> ECDH key material   (server_pub, client_priv, nonces)
+  0x10ef0    |     FUN: ECDH point mult (P-256)
+  0x10bd0    +-> Session keys        (application keys)
   0x11de0  KDF-PRIMITIVE             SP800-108 Counter-Mode HMAC-SHA256
-  0x124b0  HMAC-SHA256 (mit Label)   Identity/MAC
-  0x10a90  AES (SDCP-Datenkanal)     key @0x571d0
+  0x124b0  HMAC-SHA256 (with label)  Identity/MAC
+  0x10a90  AES (SDCP data channel)   key @0x571d0
 ```
 
-## 31.2 Keyschema (Labels sind die Literalbytes)
+## 31.2 Key scheme (Labels are literal bytes)
 ```
   Z            = ECDH_P256(client_priv, server_pub)              (32 B)
   master_mat   = KDF(Z,          "master secret",  nonce_c‖nonce_s, 32 B)
-  session_keys = KDF(master_mat, "application keys", (leer),         64 B)
-                 -> AES-Key(32) ‖ MAC-Key(32)  (genaue Aufteilung noch zu pruefen)
+  session_keys = KDF(master_mat, "application keys", (empty),        64 B)
+                 -> AES Key(32) ‖ MAC Key(32)  (exact split to be verified)
   identity/MAC = HMAC-SHA256(session_key, "connect"|"reconnect" ‖ transcript)
 ```
 Labels (RVA): `master secret`@0x48b78, `application keys`@0x48b88,
 `connect`@0x48ba0, `connect2`@0x48ba8, `reconnect`@0x48bb8, `cert_m: `@0x48bc8.
 
-## 31.3 KDF-Primitive `FUN_180011de0` = SP800-108, wie die Transport-KDF
-Signatur `kdf(key, keylen, label, data, datalen, out, outlen)`. Struktur
-identisch zur bereits verifizierten Transport-KDF (`FUN_1800325d0`):
-pro 32-B-Block `HMAC-SHA256(key, BE32(counter) ‖ label ‖ … ‖ data ‖ BE32(outlen·8))`.
-Die exact Feldreihenfolge (Trenner `0x00`, Position von counter/bitlen) muss
-noch am Draht bestaetigt werden, da sie offline nicht pruefbar ist (der
-ephemere Client-Privkey der Windows-Captures fehlt).
+## 31.3 KDF primitive `FUN_180011de0` = SP800-108, like the transport KDF
+Signature `kdf(key, keylen, label, data, datalen, out, outlen)`. Structure
+identical to the already verified transport KDF (`FUN_1800325d0`):
+per 32-B block `HMAC-SHA256(key, BE32(counter) ‖ label ‖ … ‖ data ‖ BE32(outlen*8))`.
+The exact field order (separator `0x00`, position of counter/bitlen) must
+still be confirmed on the wire, because it cannot be verified offline (the
+ephemeral client private key of the Windows captures is missing).
 
-## 31.4 Wichtige Einschraenkung fuer die Verifikation
-Anders als bei Transport-KDF und Master-Key laesst sich die SDCP-KDF **nicht
-offline gegen die Captures pruefen**: dort fehlt der ephemere Client-Private-Key
-(er wurde pro Windows-Session neu erzeugt und nie uebertragen). Verifikation
-geht daher nur auf der Hardware: eigenen Handshake fahren und pruefen, ob der
-Sensor unsere Identity akzeptiert (Enroll-Frames werden angerechnet, `a0` > 0).
-Deshalb sind fuer die exact Feldreihenfolge 1–2 Hardware-Iterationen realistisch.
+## 31.4 Important limitation for verification
+Unlike the transport KDF and master key, the SDCP KDF **cannot be
+verified offline against the captures**: the ephemeral client private key is missing there
+(it was newly generated per Windows session and never transmitted). Verification
+is therefore only possible on the hardware: run our own handshake and check whether the
+sensor accepts our identity (Enroll frames are counted, `a0` > 0).
+Therefore, 1-2 hardware iterations are realistic for the exact field order.
 
 ---
 
-# 32. Alltags-Entsperren via PAM (Verify-only) — 2026-07-29
+# 32. Everyday unlocking via PAM (Verify-only) — 2026-07-29
 
-Da Verify auf der Hardware funktioniert (Abs. 28/29), ist ein im Alltag
-nutzbares fingerprint-Entsperren möglich, OHNE Linux-Enroll und ohne die
-große libfprint-C-Integration — über PAM (`pam_exec`), das gegen die bereits
-im Chip liegenden (Windows-)Templates matcht.
+Since Verify works on the hardware (paragraphs 28/29), an everyday
+usable fingerprint unlock is possible, WITHOUT Linux Enroll and without the
+large libfprint C integration — via PAM (`pam_exec`), which matches against the
+(Windows) templates already stored in the chip.
 
-## Dateien
-- `scratch/goodix_verify.py` — Standalone-Verify. Fährt den Transportkanal hoch,
-  wartet auf Finger, `a5`-Match. Exit: **0=Match, 1=kein Match, 2=Timeout,
-  3=Error**. `--quiet` für PAM. CRC8/Transport gegen physical/real Pakete verifiziert.
-- `install_fingerprint_unlock.sh` — Installer: kopiert nach `/opt/goodix-fp`,
-  legt `/usr/local/bin/goodix-fp-verify` an, schreibt udev-Regel, Self-test,
-  optional PAM-Aktivierung.
+## Files
+- `scratch/goodix_verify.py` — Standalone verify. Brings up the transport channel,
+  waits for finger, `a5` match. Exit: **0=Match, 1=No Match, 2=Timeout,
+  3=Error**. `--quiet` for PAM. CRC8/Transport verified against physical/real packets.
+- `install_fingerprint_unlock.sh` — Installer: copies to `/opt/goodix-fp`,
+  creates `/usr/local/bin/goodix-fp-verify`, writes udev rule, self-test,
+  optional PAM activation.
 
 ## Installation
 ```bash
-sudo ./install_fingerprint_unlock.sh          # installieren + testen
-sudo ./install_fingerprint_unlock.sh --sudo   # fingerprint für 'sudo' aktivieren
-sudo ./install_fingerprint_unlock.sh --remove # alles rückgängig
+sudo ./install_fingerprint_unlock.sh          # install + test
+sudo ./install_fingerprint_unlock.sh --sudo   # activate fingerprint for 'sudo'
+sudo ./install_fingerprint_unlock.sh --remove # revert everything
 ```
-Der fingerprint wird als **`sufficient`** eingetragen: das Passwort
-funktioniert immer weiter, nichts wird ersetzt.
+The fingerprint is entered as **`sufficient`**: the password
+always continues to work, nothing is replaced.
 
-## Sicherheit & Limitations (Honest Assessment)
-- **Passwort-Fallback bleibt immer aktiv** — kein Lockout-Risiko.
-- `pam_exec` ist **sequentiell**: `sudo` wartet bis zu `TIMEOUT_S` (6 s) auf
-  einen Finger, bevor es zum Passwort durchfällt. Finger zügig auflegen, sonst
-  kurz warten und Passwort tippen.
-- Kein Prompt im lock screen: `pam_exec` kann nicht sauber „Finger auflegen"
-  anzeigen. Für Terminal/`sudo`/Konsolen-Login ist das ok.
-- **Grafische Sperrbildschirme (GDM/SDDM/KDE)** brauchen einen Eintrag in deren
-  PAM-Stack (z.B. `/etc/pam.d/system-auth` oder der Greeter). Das automatische
-  Editieren ist riskant (Aussperr-Gefahr) und daher NICHT im Installer — bei
-  Bedarf manuell und mit offener Root-Shell als Absicherung.
-- Dies ist **keine** SDCP-Attestierung wie unter Windows Hello. Der Sensor
-  matcht real on-chip, aber die PAM-Ebene hat keine Anti-Replay-Absicherung auf
-  Protokollebene. Für einen persönlichen Laptop eine pragmatische Lösung; für
-  Hochsicherheitsanforderungen wäre die volle libfprint/SDCP-Integration nötig.
+## Security & Limitations (Honest Assessment)
+- **Password fallback always remains active** — no lockout risk.
+- `pam_exec` is **sequential**: `sudo` waits up to `TIMEOUT_S` (6 s) for
+  a finger before falling through to the password. Place finger promptly, otherwise
+  wait briefly and type password.
+- No prompt in the lock screen: `pam_exec` cannot cleanly display "Place finger".
+  For Terminal/`sudo`/console login this is ok.
+- **Graphical lock screens (GDM/SDDM/KDE)** need an entry in their
+  PAM stack (e.g., `/etc/pam.d/system-auth` or the greeter). Automated
+  editing is risky (lockout danger) and therefore NOT in the installer — if
+  needed, do it manually with an open root shell as a safeguard.
+- This is **not** an SDCP attestation like under Windows Hello. The sensor
+  matches real on-chip, but the PAM layer has no anti-replay protection at the
+  protocol level. A pragmatic solution for a personal laptop; for
+  high-security requirements, full libfprint/SDCP integration would be necessary.
 
 ## Prerequisites
-`python-cryptography`, `libusb`. fprintd darf den Sensor nicht belegen
-(Installer stoppt es für den Test; bei Dauerbetrieb ggf. `systemctl disable
-fprintd`, falls es stört).
+`python-cryptography`, `libusb`. fprintd must not occupy the sensor
+(installer stops it for the test; for continuous operation, `systemctl disable
+fprintd` if it interferes).
 
 ---
 
-# 33. SDCP-Enroll: Live-Handshake gefangen, KDF noch nicht cracked/broken (2026-07-29)
+# 33. SDCP Enroll: Live handshake caught, KDF not yet cracked/broken (2026-07-29)
 
 ## Progress
-- **`scratch/sdcp_capture.py`** fährt einen physical/real SDCP-Handshake mit SELBST
-  erzeugten Keyn und speichert alles nach `scratch/sdcp_capture.json`.
-  Auf der Hardware bestätigt: der Sensor akzeptiert unseren ClientHello
-  (`nonce(32)+EC1(65)+EC2(65)`) und antwortet mit vollem ServerHello (1366 B).
-  Damit haben wir eine Live-Session mit **bekanntem** Client-Private-Key.
-- ServerHello-Struktur (nach dem 847-B-Certificate, 515 B):
+- **`scratch/sdcp_capture.py`** runs a physical/real SDCP handshake with SELF
+  generated keys and saves everything to `scratch/sdcp_capture.json`.
+  generated keys and saves everything to `scratch/sdcp_capture.json`.
+  Confirmed on hardware: the sensor accepts our ClientHello
+  (`nonce(32)+EC1(65)+EC2(65)`) and replies with a full ServerHello (1366 B).
+  This gives us a live session with a **known** client private key.
+- ServerHello structure (after the 847 B certificate, 515 B):
   ```
-    +0    EC static (65 B)   0437fb51…  = Geraete-Attestierungsschluessel (== Windows)
-    +65   EC server-eph(65)  04e9c7bd…  = Server-Ephemeral (pro Session)
-    +130  96 B  STATISCH
-    +226  64 B  SITZUNG   (Nonce? MAC?)
-    +291  104 B SITZUNG   (weitere EC-Punkte @+290,+406)
-    +396  119 B SITZUNG   (Signatur)
+    +0    EC static (65 B)   0437fb51…  = Device attestation key (== Windows)
+    +65   EC server-eph(65)  04e9c7bd…  = Server ephemeral (per session)
+    +130  96 B  STATIC
+    +226  64 B  SESSION   (Nonce? MAC?)
+    +291  104 B SESSION   (additional EC points @+290,+406)
+    +396  119 B SESSION   (Signature)
   ```
 
 ## What Did NOT Work
-Breiter Offline-Angriff (75600 Kombinationen: 4 ECDH-Kandidaten × 5 SP800-108-
-Feldordnungen × ~20 nonce_s-Fenster × 2 Kontext-Ordnungen × 3 Keys × 10
-Transcripts, plus HKDF-Varianten): **0 Treffer**. Der Server-MAC ist also nicht
-`HMAC(abgeleiteter_key, simpler_transcript)` — der MAC signiert einen **komplexen
-Transcript-Hash**, der in `FUN_180011870` berechnet wird (Eingang: Certificate +
-beide EC-Punkte + Nonces). Diese Funktion ist noch nicht decompiles.
+Broad offline attack (75,600 combinations: 4 ECDH candidates × 5 SP800-108
+field orders × ~20 nonce_s windows × 2 context orders × 3 keys × 10
+transcripts, plus HKDF variants): **0 matches**. So the server MAC is not
+`HMAC(derived_key, simple_transcript)` — the MAC signs a **complex
+transcript hash** calculated in `FUN_180011870` (Input: certificate +
+both EC points + nonces). This function is not yet decompiled.
 
-## Ehrliche Analysis & Protocol Classification
-Anders als Transport-KDF und Master-Key (die sich nach dem Dekompilieren zügig
-offline verifizieren ließen) ist SDCP mehrstufig verzahnt: Transcript-Hash →
-KDF → MAC, plus die Wire→Struktur-Parsung. Zum Knacken fehlen noch:
-1. `FUN_180011870` — der genaue Transcript-Hash (nächster Dekompilier-Step).
-2. Bestätigung der KDF-Feldreihenfolge (`FUN_180011de0`) an physical/real Werten.
-3. Die exact Wire-Position von server_nonce/server_MAC (Parse-Funktion).
+## Honest Assessment & Protocol Classification
+Unlike the transport KDF and master key (which were quickly verifiable offline
+after decompiling), SDCP is deeply interlocked: Transcript hash →
+KDF → MAC, plus the wire→structure parsing. Still missing to crack:
+1. `FUN_180011870` — the exact transcript hash (next decompilation step).
+2. Confirmation of the KDF field order (`FUN_180011de0`) on physical/real values.
+3. The exact wire position of server_nonce/server_MAC (parse function).
 
-Das ist machbar, aber realistisch mehrere weitere Dekompilier-Runden. Nächster
-Step: `./run_ghidra.sh` (Ziel jetzt `FUN_180011870`) → `sdcp6.c`.
+This is doable, but realistically requires several more decompilation rounds. Next
+step: `./run_ghidra.sh` (target now `FUN_180011870`) → `sdcp6.c`.
 
 ---
 
-# 34. SDCP-Transcript geklärt, aber Framing-Diskrepanz blockiert Offline-Crack (2026-07-29)
+# 34. SDCP transcript clarified, but framing discrepancy blocks offline crack (2026-07-29)
 
-## Neue Insights (sdcp6.c)
-- **`FUN_180011870` = SHA256** (md-Typ 6, init + 7 Updates + finish) über die
-  Server-Handshake-Felder. Der Server-MAC ist damit:
-  `server_MAC = HMAC-SHA256(session_key, SHA256(cert ‖ EC-Punkte ‖ nonce ‖ Blöcke))`.
-- Verifikations-Flow in `FUN_180010320`: ECDH → master-KDF ("master secret") →
+## New Insights (sdcp6.c)
+- **`FUN_180011870` = SHA256** (md type 6, init + 7 updates + finish) over the
+  server handshake fields. The server MAC is therefore:
+  `server_MAC = HMAC-SHA256(session_key, SHA256(cert ‖ EC points ‖ nonce ‖ blocks))`.
+- Verification flow in `FUN_180010320`: ECDH → master-KDF ("master secret") →
   app-KDF ("application keys") → SHA256-Transcript → `HMAC(session_key, transcript)`
-  == server_MAC (Vergleich per memcmp).
-- `FUN_1800127a0` prüft die **Certificateskette** ("cert_m: ", "Client Certs: ")
-  gegen zwei eingebettete Root-Certificatee (`DAT_180055b30`, `DAT_180054f80`).
+  == server_MAC (comparison via memcmp).
+- `FUN_1800127a0` verifies the **certificate chain** ("cert_m: ", "Client Certs: ")
+  against two embedded root certificates (`DAT_180055b30`, `DAT_180054f80`).
 
-## Warum der Offline-Crack (noch) scheitert — die Kernursache
-Der DLL-SDCP-Code liest MAC/Nonce/Cert aus einer Struktur mit Offsets
-`+0x14`/`+0x34`/`+0x54` — das ist die **IOCTL-Rahmung** zwischen DLL und
-Kerneltreiber. Unser entschlüsseltes **e3-ServerHello** hat aber eine ANDERE
-Rahmung (Header `71040000`, Certificate bei `+4`). Beide tragen denselben
-SDCP-Inhalt, aber an unterschiedlichen Positionen. Ohne die genaue
-Wire↔IOCTL-Abbildung rate ich gegen die falschen Byte-Offsets → alle
-Brute-Force-Runs (78000+ Kombinationen) treffen nicht.
+## Why the offline crack (still) fails — the root cause
+The DLL SDCP code reads MAC/Nonce/Cert from a structure with offsets
+`+0x14`/`+0x34`/`+0x54` — this is the **IOCTL framing** between DLL and
+kernel driver. However, our decrypted **e3 ServerHello** has a DIFFERENT
+framing (header `71040000`, certificate at `+4`). Both carry the same
+SDCP content, but at different positions. Without the exact
+wire↔IOCTL mapping I am guessing against the wrong byte offsets → all
+brute-force runs (78,000+ combinations) miss.
 
-## Ehrliche Lage & realistische Optionen
-SDCP-Enroll ist damit die mit Abstand zäheste Ebene: mehrstufig (ECDH → 2× KDF →
-SHA256 → HMAC), mit Certificatesketten-Prüfung und zwei verschiedenen Rahmungen.
-Anders als alle bisherigen Schichten lässt es sich **nicht** durch
-Offline-Brute-Force gegen die Captures knacken.
+## Honest Situation & Realistic Options
+SDCP Enroll is therefore by far the toughest layer: multi-staged (ECDH → 2× KDF →
+SHA256 → HMAC), with certificate chain validation and two different framings.
+Unlike all previous layers, it **cannot** be cracked by
+offline brute-forcing against the captures.
 
-Drei mögliche Wege:
-1. **Emulation (aussichtsreichster Weg):** `FUN_18000f020` (ClientHello+Keygen)
-   und `FUN_180010320` (ServerHello→Session-Key) mit Unicorn ausführen — DRBG
-   auf bekannte Werte gehookt. Dann liefert die Emulation den Session-Key direkt
-   aus UNSEREM Live-ServerHello, ohne Raten. Die vtable-/mbedtls-Aufrufe laufen
-   im Emulator (Code ist gemappt). Aufwändiger Aufbau, aber umgeht die
-   Framing-Frage komplett. **Empfohlen.**
-2. **Weiter dekompilieren:** die IOCTL-/Parse-Schicht (`FUN_180007da0` &
-   Umfeld) reversen, um Wire↔Struktur zu mappen. Mehrere Runden, unsicher.
-3. **Konsolidieren:** Verify-Unlock läuft (Alltagsziel erreicht). SDCP-Enroll
-   als offenes Forschungsthema zurückstellen.
+Three possible paths:
+1. **Emulation (most promising path):** Execute `FUN_18000f020` (ClientHello+Keygen)
+   and `FUN_180010320` (ServerHello→Session-Key) with Unicorn — DRBG
+   hooked to known values. Then the emulation delivers the session key directly
+   from OUR live ServerHello, without guessing. The vtable/mbedtls calls run
+   in the emulator (code is mapped). Complex setup, but bypasses the
+   framing issue entirely. **Recommended.**
+2. **Continue decompiling:** reverse the IOCTL/parse layer (`FUN_180007da0` &
+   surroundings) to map wire↔structure. Multiple rounds, uncertain.
+3. **Consolidate:** Verify unlock is working (everyday goal achieved). Postpone SDCP Enroll
+   as an open research topic.
 
-Der praktische Alltagsnutzen (fingerprint-Entsperren) ist unabhängig davon
-bereits erreicht und einsatzbereit.
+The practical everyday utility (fingerprint unlocking) is already
+achieved independently and ready for use.
 
 ---
 
-# 35. DURCHBRUCH: komplette SDCP-Kette per Disassembly rekonstruiert (2026-07-29)
+# 35. BREAKTHROUGH: Complete SDCP key schema reconstructed via disassembly (2026-07-29)
 
-Statt Ghidra/Emulation (Sandbox kann beides nicht) wurde die DLL mit **objdump**
-disassembliert und die gesamte SDCP-Kryptokette von Hand aus dem Maschinencode
-rekonstruiert. Alle Werte sind damit binär-belegt, nicht estimated/guessed.
+Instead of Ghidra/Emulation (sandbox can do neither), the DLL was disassembled with **objdump**
+and the entire SDCP crypto chain was manually reconstructed from the machine code.
+All values are therefore binary-proven, not estimated/guessed.
 
 ## KDF (FUN_180011de0) — exact NIST SP800-108 Counter Mode
     K(i) = HMAC-SHA256(key, BE32(i) || label||0x00 || context || BE32(outlen*8))
-- Counter i 1-basiert, 4B big-endian
-- Label wird INKLUSIVE Nullterminator gehasht ("master secret\0")
+- Counter i 1-based, 4B big-endian
+- Label is hashed INCLUDING null terminator ("master secret\0")
 - L = outlen in BITS, 4B big-endian
 - output = K(1)||K(2)||… truncate outlen
-=> bestätigt exact die bisherige sp800_108-Formel.
+=> exactly confirms the previous sp800_108 formula.
 
-## Session-Key-Ableitung (FUN_180010320 / _c30 / _bd0)
-    Z        = ECDH(client_priv, EC_B)              # EC_B = Server-Ephemeral
+## Session Key Derivation (FUN_180010320 / _c30 / _bd0)
+    Z        = ECDH(client_priv, EC_B)              # EC_B = Server Ephemeral
     master   = KDF(Z,      "master secret\0",   nonce_c || nonce_s, 32)
-    session  = KDF(master, "application keys\0", <leer>,            64)  # 2×32B
-- nonce_c = unsere Client-Nonce (global 0x57188)
-- nonce_s = Server-Nonce (struct+0x34)
-- ECDH-Punkt ist EC_B (arg1 = [rbp-0x50] = zweiter EC-Punkt nach Certificate)
+    session  = KDF(master, "application keys\0", <empty>,           64)  # 2×32B
+- nonce_c = our client nonce (global 0x57188)
+- nonce_s = server nonce (struct+0x34)
+- ECDH point is EC_B (arg1 = [rbp-0x50] = second EC point after certificate)
 
 ## Transcript (FUN_180011870) = SHA256
     transcript = SHA256(cert || EC_A(65) || EC_B(65) || 32B@130 || 64B@162 || 64B@226)
-- alle Felder aus dem ServerHello-Tail (nach dem Certificate)
+- all fields from the ServerHello tail (after the certificate)
 
-## MAC-Verifikation (FUN_1800121d0 + memcmp)
+## MAC Verification (FUN_1800121d0 + memcmp)
     server_MAC (struct+0x14) == HMAC-SHA256(session_key, transcript)
 
-## ClientHello (FUN_18000f020) — 105 Bytes, EXAKT rekonstruiert
+## ClientHello (FUN_18000f020) — 105 Bytes, EXACTLY reconstructed
     [len u32=0x69] [ver u16=1] [type u16] [nonce_c 32B] [ephemeral_pubkey 65B]
-- nur EIN Ephemeral-Key (nicht zwei!). Unser altes Capture (nonce+pub1+pub2, kein
-  Header) war deshalb FALSCH strukturiert -> Sensor interpretierte die Bytes falsch
-  -> ECDH passte nie -> alle bisherigen Offline-Cracks (100k+ Kombinationen) mussten
-  scheitern. DAS war die eigentliche Ursache, nicht die Krypto.
+- only ONE ephemeral key (not two!). Our old capture (nonce+pub1+pub2, no
+  header) was therefore INCORRECTLY structured -> sensor misinterpreted the bytes
+  -> ECDH never matched -> all previous offline cracks (100k+ combinations) had to
+  fail. THAT was the actual root cause, not the crypto.
 
-## Identity-Labels (FUN_1800124b0): "enroll", "identify"
-Für den Enroll-Finish nach erfolgreichem Connect.
+## Identity Labels (FUN_1800124b0): "enroll", "identify"
+For the Enroll finish after a successful connect.
 
-## Nächster Step
-scratch/sdcp_capture.py NEU: sendet korrektes 105B-ClientHello mit bekanntem
-Ephemeral-Key und verifiziert den Server-MAC sofort offline (brute-forced nur noch
-die nonce_s-Position über 32B-Fenster). Ein Treffer bestätigt die GESAMTE Kette und
-liefert den Session-Key -> danach Identity berechnen und Enroll.
+## Next Step
+scratch/sdcp_capture.py NEW: sends correct 105B ClientHello with known
+ephemeral key and verifies the server MAC immediately offline (only brute-forces
+the nonce_s position over 32B windows). A match confirms the ENTIRE chain and
+delivers the session key -> calculate identity and Enroll.
 
 ---
 
-# 36. ★ SDCP-SESSION-KRYPTO GEKNACKT (2026-07-29) ★
+# 36. ★ SDCP SESSION CRYPTO CRACKED (2026-07-29) ★
 
-Live auf der Hardware reproduziert und offline verifiziert (Server-MAC nachgerechnet).
+Reproduced live on hardware and verified offline (calculated server MAC).
 
-## Draht-Format (bestätigt via Windows-Mitschnitt + eigenem Handshake)
-ClientHello (e3 00, transport-verschlüsselt):
+## Wire Format (confirmed via Windows capture + custom handshake)
+ClientHello (e3 00, transport-encrypted):
     nonce_c(32) || EC1(65) || EC2(65)                    = 162 Bytes
-ServerHello-Flight (Response):
+ServerHello Flight (Response):
     [71 04 00 00] || cert(847) || tail(515)              = 1366 Bytes
 
-## ServerHello-Tail-Layout (nach dem Certificate, Offsets relativ Tail)
-    @0   EC_A(65)   staticer Geräteschlüssel (konstant)
-    @65  EC_B(65)   Server-Ephemeral  ← ECDH-Punkt
+## ServerHello Tail Layout (after the certificate, offsets relative to tail)
+    @0   EC_A(65)   static device key (constant)
+    @65  EC_B(65)   Server Ephemeral  ← ECDH point
     @130 32B        \
-    @162 64B         > Transcript-Material (tail[0:290])
+    @162 64B         > Transcript material (tail[0:290])
     @226 64B        /
-    @290 EC_C(65)   weiterer Punkt
-    @355..515       Session-Blöcke, darunter:
-    @419 MAC(32)    Server-Key-Confirmation-MAC
-    @451 nonce_s(32) Server-Nonce
+    @290 EC_C(65)   additional point
+    @355..515       Session blocks, including:
+    @419 MAC(32)    Server Key Confirmation MAC
+    @451 nonce_s(32) Server nonce
 
-## Complete verifizierte Ableitung (1:1 aus GoodixMocSensorAdapter.dll)
-    Z          = ECDH(client_priv, EC_B)                        # X-Koord, 32B
+## Complete Verified Derivation (1:1 from GoodixMocSensorAdapter.dll)
+    Z          = ECDH(client_priv, EC_B)                        # X-coord, 32B
     master     = SP800-108(Z,      "master secret\0",   nonce_c||nonce_s, 32)
-    session    = SP800-108(master, "application keys\0", <leer>,          64)
+    session    = SP800-108(master, "application keys\0", <empty>,         64)
     transcript = SHA256(cert || tail[0:290])
     server_MAC = HMAC-SHA256(session[0:32], "connect\0" || transcript)
-Prüfung: server_MAC == ServerHello-Feld @ (cert_ende+419).  ★ bestätigt ★
+Check: server_MAC == ServerHello field @ (cert_end+419).  ★ confirmed ★
 
 ## SP800-108 (FUN_180011de0), exact
     K(i) = HMAC-SHA256(key, BE32(i) || label||0x00 || context || BE32(outlen*8))
-    label INKLUSIVE Nullterminator; Counter 1-basiert; L in Bits.
+    label INCLUDES null terminator; Counter 1-based; L in bits.
 
-## Wichtige Irrwege (dokumentiert, damit nicht wiederholt)
-- FUN_18000f020 erzeugt das INTERNE 105B-DLL/IOCTL-Format
-  ([len][ver][type][nonce][1×pubkey]); der Kerneltreiber übersetzt es ins
-  162B-Draht-Format. Direkt an den Sensor gesendet ergibt es einen falschen Pfad
-  (1201B-Response) — NICHT verwenden. Draht = nonce+EC+EC.
-- connect_type-Feld ist NICHT im Draht-ClientHello (das ist rein DLL-intern).
+## Important Misdirections (documented to avoid repeating)
+- FUN_18000f020 creates the INTERNAL 105B DLL/IOCTL format
+  ([len][ver][type][nonce][1×pubkey]); the kernel driver translates it into
+  the 162B wire format. Sent directly to the sensor, it yields a wrong path
+  (1201B response) — DO NOT use. Wire = nonce+EC+EC.
+- connect_type field is NOT in the wire ClientHello (this is purely DLL-internal).
 
-## Session-Key nutzbar für
-Ab hier ist der authentifizierte Session-Key verfügbar. Nächster Step:
-Host-Identity/Finish (Labels "connect"/"enroll"/"identify" via FUN_1800124b0)
-berechnen und für den SDCP-Enroll senden.
+## Session Key Usable For
+From here, the authenticated session key is available. Next step:
+Calculate host identity/finish (labels "connect"/"enroll"/"identify" via FUN_1800124b0)
+and send for the SDCP Enroll.
 
 ---
 
-# 37. Enroll-Protokoll: Struktur verstanden (2026-07-29)
+# 37. Enroll Protocol: Structure Understood (2026-07-29)
 
-## Geräte-Response-MAC (live cracked/broken)
-Auf jedes e3 01 <host_identity> antwortet der Sensor mit '00' + 32B:
+## Device Response MAC (live cracked/broken)
+For every e3 01 <host_identity>, the sensor replies with '00' + 32B:
     device_MAC = HMAC-SHA256(session_key, "reconnect\0" || host_identity)
-=> beidseitige Keybestätigung; der Sensor prüft X bei e3 01 NICHT
-   (bestätigt nur). Beide Seiten nutzen dasselbe gelabelte HMAC (FUN_1800124b0).
+=> mutual key confirmation; the sensor DOES NOT verify X on e3 01
+   (only confirms). Both sides use the same labeled HMAC (FUN_1800124b0).
 
-## Host-Identity
+## Host Identity
     identity = HMAC-SHA256(session_key, "enroll\0"|"identify\0" || X)
-X = 32B (Puffer 0x57258, gesetzt via FUN_18000f140 aus dem Engine-Adapter).
-Hypothese: X ist eine frei wählbare Host-Nonce (Frische) — da der Sensor die
-Identity nur als gültige Session-Key-HMAC prüft, nicht deren Inhalt.
+X = 32B (buffer 0x57258, set via FUN_18000f140 from the engine adapter).
+Hypothesis: X is a freely choosable host nonce (freshness) — since the sensor
+only verifies the identity as a valid session key HMAC, not its content.
 
-## Enroll-Choreografie (aus Windows-Mitschnitt)
+## Enroll Choreography (from Windows capture)
     e0 01 (PSK) -> a2 (arm) -> a5 (identify, 1110B) -> e3 02/e3 01 (identity)
-    -> b0 02 (Kalibrierung) -> [a1 Enroll-Init, 33B] -> Schleife:
-        e3 02/e3 01 (neue identity) -> b0 02 -> a2 000f4101 -> a0 016464
-        -> Progress 00 XX YY  (XX steigt 0x00->0x32->0x61->...->0x64)
-    Bei 100%: a3/a4 committen den Template.
-'000000' beim a0 = "noch kein Finger-Frame", KEINE Identity-Ablehnung.
+    -> b0 02 (Calibration) -> [a1 Enroll Init, 33B] -> Loop:
+        e3 02/e3 01 (new identity) -> b0 02 -> a2 000f4101 -> a0 016464
+        -> Progress 00 XX YY  (XX increases 0x00->0x32->0x61->...->0x64)
+    At 100%: a3/a4 commit the template.
+'000000' on a0 = "no finger frame yet", NO identity rejection.
 
-## Nächster Step
-scratch/enroll_attempt.py: repliziert die Sequenz mit unserem Session-Key und
-X=Host-Nonce; Progress wird live angezeigt. Bei Erfolg -> Template-Commit.
+## Next Step
+scratch/enroll_attempt.py: replicates the sequence with our session key and
+X=Host Nonce; progress is displayed live. On success -> template commit.
 
 ---
 
-# 38. Enroll-Status: alle Krypto-Teile ok, a0 erfasst keinen Frame (2026-07-29)
+# 38. Enroll Status: All crypto parts ok, a0 captures no frame (2026-07-29)
 
-## Was funktioniert (live verifiziert)
-- SDCP-Handshake + Session-Key + Server-MAC  ✓
-- Beidseitige Keybestätigung (device_MAC = HMAC(sk,"reconnect\0"||id))  ✓
-- Finger-Erkennung: a2 liefert Finger-Region, b0 liefert wechselndes Bild  ✓
-- a5 (identify) akzeptiert JEDE gültige Session-Key-HMAC (X-Inhalt wird NICHT
-  verified) und liefert bei aufliegendem Finger einen Match-Token; 'ff' = kein
-  Finger (nicht: Identity ungültig)  ✓
-- a1 (Enroll-Init) liefert 33B  ✓
+## What Works (live verified)
+- SDCP handshake + session key + server MAC  ✓
+- Mutual key confirmation (device_MAC = HMAC(sk,"reconnect\0"||id))  ✓
+- Finger detection: a2 yields finger region, b0 yields changing image  ✓
+- a5 (identify) accepts ANY valid session key HMAC (X content is NOT
+  verified) and returns a match token with finger present; 'ff' = no
+  finger (not: identity invalid)  ✓
+- a1 (Enroll Init) yields 33B  ✓
 
-## Was NICHT funktioniert
-- a0 016464 liefert IMMER 000000 (kein Frame), während Windows pro Frame
-  wechselnde Metriken liefert (003232, 00612a, 002f10, 005524 = Abdeckung/Qualität,
-  KEIN monotoner Progress). Enroll akkumuliert intern; a0-Payload variiert auch
+## What Does NOT Work
+- a0 016464 ALWAYS returns 000000 (no frame), while Windows yields
+  changing metrics per frame (003232, 00612a, 002f10, 005524 = coverage/quality,
+  NO monotonic progress). Enroll accumulates internally; a0 payload also varies
   (016464 -> 016450).
 
-## Wahrscheinlichste Ursachen (offen)
-1. Fehlender Imaging-/FDT-Modus: der funktionierende VERIFY-Pfad
-   (goodix_gf3268.py) setzt vor dem Capture FDT/POV-Imaging; unser Enroll nicht.
-   a0 könnte den von b0/FDT vorbereiteten Frame lesen.
-2. Finger bereits registriert: a5 liefert Match-Token statt '01'. Windows-Enroll
-   lief mit fresh/dynamicem Finger (a5->01). Sensor enrollt evtl. keinen bekannten Finger.
-3. Feinsequenz/Timing zwischen a2 (arm) und a0 (read).
+## Most Likely Causes (open)
+1. Missing imaging/FDT mode: the working VERIFY path
+   (goodix_gf3268.py) sets FDT/POV imaging before capture; our Enroll does not.
+   a0 might read the frame prepared by b0/FDT.
+2. Finger already registered: a5 yields match token instead of '01'. Windows Enroll
+   ran with fresh/dynamic finger (a5->01). Sensor might not enroll a known finger.
+3. Fine sequence/timing between a2 (arm) and a0 (read).
 
-## Erreichtes (praktisch)
-Das Alltagsziel (fingerprint-Entsperren) ist über den Verify-Pfad bereits
-erfüllt und ausgerollt. Die kryptografische Kernaufgabe (SDCP-Session) ist
-complete resolved und live bestätigt.
-
----
-
-# 39. Enroll-Blockade eingegrenzt — Status für Übergabe (2026-07-29)
-
-## Definitiv bestätigt (live, mehrfach reproduziert)
-- SDCP-Session-Krypto complete resolved, Server-MAC nachgerechnet ✓ (Section 36)
-- Der Sensor validiert die SDCP-Identity INHALTLICH NICHT: der produktive
-  Verify-Pfad läuft mit `a5 00 <os.urandom(32)>` und matcht korrekt.
-  => X-Suche (Section 37) war gegenstandslos. Enroll ist KEIN Auth-Problem.
-- a5-Match-Orakel funktioniert einwandfrei (check_finger.py):
-  registrierte Finger -> 1110B Token, fresh/dynamice Finger -> 0x01.
-- REIHENFOLGE-REGEL: vor jedem `a5` MUSS ein `a2 00 01002301` stehen
-  (Finger-Detektion, macht den Sensor scharf). Ohne das liefert a5 immer 'ff'
-  (= kein Finger), unabhängig vom Finger. War die Ursache falscher
-  "REGISTRIERT"-Meldungen in enroll_v5 (behoben).
-- Mit fresh/dynamicem Finger: a5 -> 01 ✓, a1 (Enroll-Init) -> 33B ✓
-
-## Die eigentliche Blockade
-`a0 00 016464` liefert IMMER `000000` (kein Frame erfasst), obwohl
-  - der Finger erkannt wird (a2 liefert Region, b0 wechselnde Bilddaten)
-  - der Finger fresh/dynamic ist (a5 -> 01)
-  - a1 initialisiert hat
-Kurz danach bricht der USB-Transfer ab (-4 Gerät weg / -7 Timeout), d.h. der
-Sensor resettet sich. Windows liefert an dieser Stelle pro Frame wechselnde
-Metriken (003232, 00612a, 002f10, 005524 — Abdeckung/Qualität, KEIN monotoner
-Progress) und variiert auch die a0-Payload (016464 -> 016450).
-
-## Wahrscheinlichste verbleibende Ursache
-Ein fehlender Imaging-/FDT-Step zwischen a2 und a0. Der Windows-Mitschnitt
-zeigt zwischen den Enroll-Frames zusätzliche commands, die wir noch nicht
-replizieren (FDT-Modus 0x32/0x34/0x36, POV_IMG 0xd2). Der Verify-Pfad braucht
-sie nicht, weil `a5` Capture+Match intern in einem Step macht — der Enroll
-dagegen liest offenbar einen VORHER von FDT/Imaging bereitgestellten Frame.
-Empfehlung für den nächsten Step: im pcapng-Mitschnitt ALLE commands
-zwischen zwei kreditierten a0 complete auflisten (auch die im annotierten
-Dump gefilterten) und 1:1 nachbauen.
-
-## Praktischer Status
-fingerprint-Entsperren (Verify) läuft produktiv und ist ausgerollt (KDE
-Lockscreen + LightDM). Der Enroll bleibt offen; für neue Finger derzeit
-Windows/Werkseinrichtung nötig.
-
-## Relevante Skripte
-- scratch/sdcp_session.py   Handshake + Session-Key (verifiziert)  ← Kern
-- scratch/check_finger.py   a5-Orakel: welche Finger sind registriert  ← funktioniert
-- scratch/goodix_verify.py  produktiver Verify (PAM)                ← funktioniert
-- scratch/enroll_v5.py      aktueller Enroll-Versuch (a0 bleibt 000000)
+## Achievements (practical)
+The everyday goal (fingerprint unlocking) is already
+fulfilled and rolled out via the Verify path. The cryptographic core task (SDCP session) is
+completely resolved and live confirmed.
 
 ---
 
-# 40. ★ ENROLL FUNKTIONIERT — Frames werden erfasst (2026-07-29)
+# 39. Enroll blockade narrowed down — Status for handover (2026-07-29)
 
-DURCHBRUCH: Aus dem ROHEN pcapng (jedes Paket zwischen zwei a0) kam die fehlende
-Zutat: VOR JEDEM a0 steht ein e3 02/e3 01-Identity-Paar (32B, Inhalt egal).
-enroll_v4/v5 hatten das weggelassen -> Sensor-Reset (-4). enroll_v6 mit dem
-e3-Paar erfasst Frames (a0 -> 004949, 003232-artige Werte).
+## Definitely confirmed (live, reproduced multiple times)
+- SDCP session crypto completely resolved, server MAC calculated ✓ (Section 36)
+- The sensor DOES NOT structurally validate the SDCP identity: the productive
+  Verify path runs with `a5 00 <os.urandom(32)>` and matches correctly.
+  => X search (Section 37) was irrelevant. Enroll is NOT an auth issue.
+- a5 match oracle works perfectly (check_finger.py):
+  registered fingers -> 1110B token, fresh/dynamic fingers -> 0x01.
+- ORDER RULE: before every `a5` there MUST be an `a2 00 01002301`
+  (finger detection, arms the sensor). Without it, a5 always yields 'ff'
+  (= no finger), regardless of the finger. Was the cause of false
+  "REGISTERED" messages in enroll_v5 (fixed).
+- With fresh/dynamic finger: a5 -> 01 ✓, a1 (Enroll Init) -> 33B ✓
 
-## a0-Responseformat (Enroll-Frame)
-    00 00 00   kein neuer Frame (neu auflegen)
-    00 XX YY   Frame erfasst, XX = Abdeckung, Ziel 0x64=100%
-    74../ff..  Frame zu ähnlich -> anderen Fingerbereich auflegen
-Abschluss: 00 64 00 -> a3 00 (commit) -> a4 <template> -> 00.
-Windows brauchte ~14 Frames mit VERSCHIEDENEN Fingerbereichen.
+## The Actual Blockade
+`a0 00 016464` ALWAYS returns `000000` (no frame captured), even though
+  - the finger is detected (a2 yields region, b0 changing image data)
+  - the finger is fresh/dynamic (a5 -> 01)
+  - a1 has initialized
+Shortly after, the USB transfer aborts (-4 device gone / -7 timeout), meaning the
+sensor resets itself. Windows yields changing metrics per frame at this point
+(003232, 00612a, 002f10, 005524 — coverage/quality, NO monotonic
+progress) and also varies the a0 payload (016464 -> 016450).
 
-## Complete Enroll-Sequenz (funktioniert)
-  Präambel (festes HELLO, b0, e0)
-  a2 01002301 -> a5 identify (fresh/dynamic=01) -> a5 01 -> e3-Paar -> b0 -> a1
-  Schleife pro Frame: e3 02/e3 01 (32B) -> b0 02 -> a2 000f4101 -> a0 016464
-  bei Abdeckung 0x64: a3 00 -> a4 (Template)
+## Most Likely Remaining Cause
+A missing imaging/FDT step between a2 and a0. The Windows capture
+shows additional commands between the Enroll frames that we do not yet
+replicate (FDT mode 0x32/0x34/0x36, POV_IMG 0xd2). The Verify path does not
+need them because `a5` does capture+match internally in one step — the Enroll,
+however, apparently reads a frame PREVIOUSLY provided by FDT/Imaging.
+Recommendation for the next step: list ALL commands in the pcapng capture
+between two credited a0 completely (including those filtered in the annotated
+dump) and replicate them 1:1.
 
-## Offen
-Nur noch: genug VERSCHIEDENE Fingerbereiche auflegen, bis Abdeckung 0x64 -> commit.
-enroll_v7.py führt durch und committet automatisch.
+## Practical Status
+Fingerprint unlocking (Verify) runs productively and is rolled out (KDE
+Lockscreen + LightDM). The Enroll remains open; currently Windows/factory setup
+needed for new fingers.
+
+## Relevant Scripts
+- scratch/sdcp_session.py   Handshake + Session key (verified)  ← Core
+- scratch/check_finger.py   a5 Oracle: which fingers are registered  ← Works
+- scratch/goodix_verify.py  productive Verify (PAM)                ← Works
+- scratch/enroll_v5.py      current Enroll attempt (a0 stays 000000)
+# 40. ★ ENROLL WORKS — Frames are being captured (2026-07-29)
+
+BREAKTHROUGH: From the RAW pcapng (every packet between two a0) came the missing
+ingredient: BEFORE EVERY a0 there is an e3 02/e3 01 Identity pair (32B, content doesn't matter).
+enroll_v4/v5 had omitted this -> sensor reset (-4). enroll_v6 with the
+e3 pair captures frames (a0 -> 004949, 003232-like values).
+
+## a0 Response Format (Enroll Frame)
+    00 00 00   no new frame (place finger again)
+    00 XX YY   frame captured, XX = coverage, target 0x64=100%
+    74../ff..  frame too similar -> place different finger area
+Completion: 00 64 00 -> a3 00 (commit) -> a4 <template> -> 00.
+Windows needed ~14 frames with DIFFERENT finger areas.
+
+## Complete Enroll Sequence (working)
+  Preamble (fixed HELLO, b0, e0)
+  a2 01002301 -> a5 identify (fresh/dynamic=01) -> a5 01 -> e3-pair -> b0 -> a1
+  Loop per frame: e3 02/e3 01 (32B) -> b0 02 -> a2 000f4101 -> a0 016464
+  at coverage 0x64: a3 00 -> a4 (template)
+
+## Open
+Only: place enough DIFFERENT finger areas until coverage 0x64 -> commit.
+enroll_v7.py executes this and commits automatically.
 
 ---
 
-# 41. ★ Enroll-Capture GELÖST — a3 finalisiert (2026-07-29)
+# 41. ★ Enroll Capture SOLVED — a3 finalizes (2026-07-29)
 
-- Payload-Phasenwechsel 016464 -> 016450 (nach 5 a0) durchbricht die erste
-  '74'-Wand. Danach 2. Wand bei ~11-12 Frames = "genug erfasst".
-- An der Wand a3 00 gesendet -> Gerät antwortet 00 = CAPTURE VOLLSTÄNDIG.
-  Die '74'-Wand bedeutet also "fertig, committen", nicht "mehr nötig".
-- a4 (Template-Commit, 100B) mit Windows-Payload -> 9f (abgelehnt). Die Payload
-  enthält 16B Template-ID + 33B Feld (ec02..) + Windows-SID (S-1-5-21-..-1001).
-  Herkunft der Felder: 33B + SID tauchen in a6(READ_OTP)-Responseen auf (Gerät),
-  16B Template-ID nur in a4 (host-generiert).
-- OFFEN: korrekte a4-Payload für Linux. Test in enroll_v12: prüft, ob a3 allein
-  das Template schon speichert (a5-Match nach a3). Wenn ja -> a4 = nur
-  Windows-Identitäts-Metadaten, für Verify/Unlock nicht nötig.
+- Payload phase change 016464 -> 016450 (after 5 a0s) breaks through the first
+  '74' wall. After that, 2nd wall at ~11-12 frames = "enough captured".
+- Sent a3 00 at the wall -> device responds 00 = CAPTURE COMPLETE.
+  So the '74' wall means "done, commit", not "more needed".
+- a4 (Template Commit, 100B) with Windows payload -> 9f (rejected). The payload
+  contains 16B Template-ID + 33B field (ec02..) + Windows SID (S-1-5-21-..-1001).
+  Origin of the fields: 33B + SID appear in a6(READ_OTP) responses (device),
+  16B Template-ID only in a4 (host-generated).
+- OPEN: correct a4 payload for Linux. Test in enroll_v12: checks if a3 alone
+  already saves the template (a5 match after a3). If yes -> a4 = only
+  Windows identity metadata, not needed for Verify/Unlock.
 
-## Complete funktionierende Capture-Sequenz
-  Präambel (HELLO, b0, e0) -> a2 01002301 -> a5(fresh/dynamic=01) -> a5 01 -> e3 -> b0
-  -> a1 -> pro Frame [e3 02/e3 01 (32B) -> b0 -> a2 000f4101 -> a0 <016464|016450>]
-  -> bei 74-Wand a3 00 (=> 00) -> a4 <100B> (Payload noch offen).
+## Complete Working Capture Sequence
+  Preamble (HELLO, b0, e0) -> a2 01002301 -> a5(fresh/dynamic=01) -> a5 01 -> e3 -> b0
+  -> a1 -> per frame [e3 02/e3 01 (32B) -> b0 -> a2 000f4101 -> a0 <016464|016450>]
+  -> at 74-wall a3 00 (=> 00) -> a4 <100B> (payload still open).
 
 ---
 
-# 42. ★★ a4-Struktur cracked/broken: Template-Record = Identity-MAC pro User (2026-07-29)
+# 42. ★★ a4 Structure cracked/broken: Template Record = Identity-MAC per User (2026-07-29)
 
-a6 (READ_OTP) liefert die gespeicherten Records (je 100B = a4-Format):
+a6 (READ_OTP) returns the stored records (100B each = a4 format):
     [62004304f5XX][16B TemplateID][16B 0][33B Identity-MAC][28B SID][00]
-Der 33B-Identity-MAC ist PRO USER (gleich für alle Templates eines Users,
-via GoodixSdcpMacEnroll berechnet) — NICHT pro Template. SID = Windows-SID.
-Storage-Adapter-Strings bestätigen: GoodixSdcpMacEnroll, CommitTemplate,
+The 33B Identity-MAC is PER USER (same for all templates of a user,
+calculated via GoodixSdcpMacEnroll) — NOT per template. SID = Windows SID.
+Storage adapter strings confirm: GoodixSdcpMacEnroll, CommitTemplate,
 GoodixSdcpVerifyAuthorizedIdentity, CreateTemplateId.
 
-STRATEGIE (enroll_v13): existierenden gültigen 33B-MAC + SID aus a6 wiederverwenden,
-nur neue 16B-Template-ID -> a4 sollte akzeptiert werden (Sensor verifiziert eine
-physical/real Identität). Damit Enroll OHNE GoodixSdcpMacEnroll-Nachbau.
-Danach a5-Match-Test: wird der neue Finger erkannt?
+STRATEGY (enroll_v13): reuse existing valid 33B-MAC + SID from a6,
+only new 16B Template-ID -> a4 should be accepted (sensor verifies a
+physical/real identity). Thus Enroll WITHOUT GoodixSdcpMacEnroll reimplementation.
+Afterwards a5 match test: is the new finger recognized?
 
 ---
 
-# 43. Enroll-CAPTURE complete resolved; a4-Commit-MAC ist der letzte Baustein (2026-07-29)
+# 43. Enroll CAPTURE complete resolved; a4 Commit MAC is the last building block (2026-07-29)
 
-## ★ GELÖST: Enroll-Capture (der schwierige Sensor-Teil)
-Complete, reproduzierbare Sequenz (enroll_v10..v15):
-  Präambel(HELLO,b0,e0) -> a2 01002301 -> a5(fresh/dynamic=01) -> a5 01 -> e3-Paar -> b0
-  -> a1 -> pro Frame: [e3 02/e3 01 (32B, Inhalt egal) -> b0 -> a2 000f4101
-           -> a0 <016464 die ersten 5, danach 016450>]
-  -> nach ~11-13 Frames '74'-Wand -> a3 00 = CAPTURE FERTIG.
-Wichtig: e3-Paar VOR jedem a0 nötig; Payload-Wechsel 016464->016450 durchbricht
-die 1. Wand; die 2. '74'-Wand bedeutet "genug -> committen".
+## ★ SOLVED: Enroll Capture (the difficult sensor part)
+Complete, reproducible sequence (enroll_v10..v15):
+  Preamble(HELLO,b0,e0) -> a2 01002301 -> a5(fresh/dynamic=01) -> a5 01 -> e3-pair -> b0
+  -> a1 -> per frame: [e3 02/e3 01 (32B, content doesn't matter) -> b0 -> a2 000f4101
+           -> a0 <016464 the first 5, then 016450>]
+  -> after ~11-13 frames '74' wall -> a3 00 = CAPTURE DONE.
+Important: e3 pair necessary BEFORE every a0; payload change 016464->016450 breaks through
+the 1st wall; the 2nd '74' wall means "enough -> commit".
 
-## a4-Record-Struktur (100 B), complete verstanden
+## a4 Record Structure (100 B), complete understood
   [62004304f500][16B TemplateID][16B 0][32B MAC][1B SID_len=0x1c][28B SID][00]
-  (a6 READ_OTP liefert genau diese Records; MAC ist PRO TEMPLATE.)
+  (a6 READ_OTP returns exactly these records; MAC is PER TEMPLATE.)
 
-## OFFEN: die 32B-a4-MAC (GoodixSdcpMacEnroll)
-- Storage-Adapter berechnet sie über ein SDCP-Interface-Objekt (global 0x18007b870)
-  -> vtable in den Sensor-Adapter (dort FUN_1800124b0 = HMAC(session_key,label||data)).
-- a4 ist BELIEBIG WIEDERHOLBAR (Zustand bleibt nach a3) -> viele Kandidaten pro
-  Enroll testbar.
-- AUSGESCHLOSSEN (alle -> 9f):
-  * geräte-statice Keys (KI, MAC_KEY, MAC_KEY[:16], AES_KEY)
-  * echter Session-Key + session_key2 + master
-  * je × Labels {"", enroll, identify, connect} × Eingaben
-    {tid, sid, tid+sid, sid+tid, tid+zeros, tid+zeros+sid, hdr+..., ganzer Record}
-- VERMUTUNG: Eingabe ist ein 32-Byte-Wert (wie X in FUN_18000f170), nicht rohe
-  tid/sid — z.B. SHA256(template/identity) oder ein geräte-geliefertes Nonce
-  (a1-Response 33B? variiert pro Enroll). Nächster Step: GoodixSdcpMacEnroll
-  im Storage-Adapter sauber tracen (vtable-Methode + Input-Buffer) ODER
-  a1-Response/Templatehash als MAC-Eingabe testen.
+## OPEN: the 32B a4 MAC (GoodixSdcpMacEnroll)
+- Storage adapter calculates it via an SDCP interface object (global 0x18007b870)
+  -> vtable into the sensor adapter (there FUN_1800124b0 = HMAC(session_key,label||data)).
+- a4 is FREELY REPEATABLE (state remains after a3) -> many candidates testable per
+  Enroll.
+- EXCLUDED (all -> 9f):
+  * device-static keys (KI, MAC_KEY, MAC_KEY[:16], AES_KEY)
+  * real session key + session_key2 + master
+  * each × labels {"", enroll, identify, connect} × inputs
+    {tid, sid, tid+sid, sid+tid, tid+zeros, tid+zeros+sid, hdr+..., entire record}
+- ASSUMPTION: Input is a 32-byte value (like X in FUN_18000f170), not raw
+  tid/sid — e.g., SHA256(template/identity) or a device-supplied nonce
+  (a1 response 33B? varies per Enroll). Next Step: clean tracing of GoodixSdcpMacEnroll
+  in the storage adapter (vtable method + input buffer) OR
+  test a1 response/template hash as MAC input.
 
-## Skripte
-- enroll_v15.py  echter Handshake + Capture + a4-MAC-Suche (Session-Key)
-- enroll_v14.py  a4-MAC-Suche (geräte-statice Keys); belegt a4-Wiederholbarkeit
-- check_finger.py  welche Finger sind registriert (a5 Token vs 01)  [funktioniert]
+## Scripts
+- enroll_v15.py  real Handshake + Capture + a4 MAC search (Session-Key)
+- enroll_v14.py  a4 MAC search (device-static keys); proves a4 repeatability
+- check_finger.py  which fingers are registered (a5 Token vs 01)  [working]
 
 ---
 
-# 44. ★★ a4-MAC-Formel gefunden + a7-Identitätsregistrierung (2026-07-29)
+# 44. ★★ a4 MAC Formula found + a7 Identity Registration (2026-07-29)
 
-DURCHBRUCH: Unter allen Kandidaten gibt GENAU EINE eine andere Response (ff statt
-9f) -> die MAC-Prüfung besteht:
+BREAKTHROUGH: Among all candidates EXACTLY ONE gives a different response (ff instead of
+9f) -> the MAC check passes:
     a4-MAC (32B) = HMAC-SHA256(session_key, "enroll\0" || a1_response[1:33])
-- a1_response = 33B Geräte-Nonce aus a1 00 (variiert pro Enroll).
-- a1[1:33] (32B, ohne Status-Byte) ist korrekt; a1[0:32]/a1[:33] -> 9f.
-- ff (nicht 9f) = MAC ok, aber Identität nicht autorisiert.
+- a1_response = 33B device nonce from a1 00 (varies per Enroll).
+- a1[1:33] (32B, without status byte) is correct; a1[0:32]/a1[:33] -> 9f.
+- ff (not 9f) = MAC ok, but identity not authorized.
 
-Fehlender Step: a7 02 (Payload 0100 + 100B-Record) REGISTRIERT einen User in
-der Session (Windows: a7 registriert User 6a88b616, dann Enroll FÜR diesen User).
-a4-SID muss = registrierte SID sein.
+Missing step: a7 02 (Payload 0100 + 100B record) REGISTERS a user in
+the session (Windows: a7 registers user 6a88b616, then Enroll FOR this user).
+a4 SID must = registered SID.
 
-enroll_v18: a6 -> a7(Record registrieren) -> Handshake -> Capture -> a3 ->
-a4 mit HMAC(sk,"enroll\0"||a1v) + registrierter SID -> Match-Test.
-
----
-
-# 45. a5=03 = hängender Enroll-Zustand; a7 0100 pollutet Arbeitsspeicher (2026-07-29)
-
-- Wiederholte abgebrochene Enrolls (a3=00 ohne gültiges a4) UND a7 0100-Aufrufe
-  bringen den Sensor in Zustand a5->03 (Enroll offen / falscher Zustand).
-- USB-Reset (libusb_reset_device) räumt das NICHT. Nur REBOOT.
-- a7-Präfixe: 0100 = registrieren/hinzufügen, 0200 = löschen
-  (aus goodix_delete_templates.pcapng).
-- Konsequenz für a4-Suche: KEIN a7; a4 innerhalb einer Session wiederholbar,
-  aber endet die Session ohne gültiges a4 -> 03 -> reboot nötig. Also wenige
-  Kandidaten pro Session, beste zuerst (a1v).
-- Beste MAC bleibt HMAC(sk,"enroll\0"||a1[1:33]) (gab 'ff'=MAC ok). Evtl. war
-  'ff' Folge des schon angeschlagenen Zustands -> im sauberen Zustand testen.
-- enroll_v20.py: sauber, ohne a7, a1v + enge Nachbarschaft.
+enroll_v18: a6 -> a7(register record) -> Handshake -> Capture -> a3 ->
+a4 with HMAC(sk,"enroll\0"||a1v) + registered SID -> match test.
 
 ---
 
-# 46. Template-Store durch Experimente GELEERT (0 Records) — Recovery (2026-07-29)
+# 45. a5=03 = hanging Enroll state; a7 0100 pollutes working memory (2026-07-29)
 
-- diag_state.py nach Reboot: a6 = 0 Records (Store LEER), a5 = ff (kein Finger).
-  Der 03-Hang/Freeze ist weg -> Sensor sauber, aber alle Abdrücke gelöscht
-  (durch a7-0100/a3-Experimente + Reboot). Deshalb kein Login mehr.
-- Recovery-Wege: (A) Windows-Hello neu einrichten [zuverlässig];
-  (B) Linux-Enroll auf sauberem Store fertigstellen [enroll_v21, a1v-MAC +
-  synthetische 28B-SID, da kein Record zum Reuse].
-- WICHTIG gelernt: a7 0100 / a3-ohne-a4 verändern den persistenten Store ->
-  künftig NUR mit Enroll-Abort/Recovery-Plan testen.
-
----
-
-# 47. FINAL-Status Enroll: Capture + MAC resolved, a4-Commit-Autorisierung offen (2026-07-29)
-
-## Auf sauberem/leerem Store bestätigt
-- a4 [HMAC(sk,"enroll\0"||a1[1:33])] -> ff (als EINZIGE Formel; alle anderen 9f).
-  => MAC-Formel korrekt (ff=MAC ok). ff ist eine Commit-Nachbedingung, NICHT
-  Folge des früher verschmutzten Zustands.
-- a1_response = a1 00 -> 33B; a1[1:33] (ohne Status-Byte) ist die MAC-Eingabe.
-- Synthetische UND reale SID -> beide ff. Also nicht das SID-Format.
-- Vermutete ff-Ursache: Identitäts-Autorisierung (GoodixSdcpVerifyAuthorizedIdentity)
-  bzw. Template-Vollständigkeit (unsere byte1-Werte blieben ~0x01, Windows 0x32-0x64;
-  a3 wurde an der 74-Wand ausgelöst, evtl. vor voller Coverage 0x64).
-
-## GELÖST
-- SDCP-Session-Krypto (Section 36), Enroll-Capture (a3=00), a4-Record-Struktur,
-  a4-MAC-Formel (HMAC(sk,"enroll\0"||a1[1:33])).
-
-## OFFEN (letzter Baustein)
-- a4-Commit-Autorisierung (ff). Am besten lösbar durch einen FRISCHEN
-  Windows-Enroll-Mitschnitt auf LEEREM Store (zeigt exact a4-Payload + Identitäts-
-  schritte für Erst-Enrollment). Alternativ: byte1 bis 0x64 capturen (volle Coverage)
-  vor a3, statt an der 74-Wand abzubrechen.
-
-## WICHTIG / Recovery
-- Store wurde durch die Experimente geleert (0 Records) -> Login kaputt.
-  Wiederherstellung: Finger in Windows Hello neu einrichten (stellt Win+Linux her).
-- a7 0100 / a3-ohne-a4 verändern persistenten Store -> künftig nur mit
-  Recovery-Plan testen.
+- Repeated aborted enrolls (a3=00 without valid a4) AND a7 0100 calls
+  bring the sensor into state a5->03 (Enroll open / wrong state).
+- USB reset (libusb_reset_device) does NOT clear this. Only REBOOT.
+- a7 prefixes: 0100 = register/add, 0200 = delete
+  (from goodix_delete_templates.pcapng).
+- Consequence for a4 search: NO a7; a4 repeatable within a session,
+  but if the session ends without valid a4 -> 03 -> reboot needed. So few
+  candidates per session, best ones first (a1v).
+- Best MAC remains HMAC(sk,"enroll\0"||a1[1:33]) (gave 'ff'=MAC ok). Possibly
+  'ff' was a consequence of the already compromised state -> test in clean state.
+- enroll_v20.py: clean, without a7, a1v + close neighborhood.
 
 ---
 
-# 48. ★★★ NATIVER libfprint-TREIBER FUNKTIONIERT (2026-07-30)
+# 46. Template Store EMPTIED by experiments (0 Records) — Recovery (2026-07-29)
 
-scratch/libfprint_natasha/libfprint/drivers/goodixsdcp/ — neuer driver
-`goodixsdcp` (27c6:6f94), gebaut auf dem goodixmoc-Skelett, mit unserer
-SDCP-Transport-Krypto (goodixsdcp_crypto.c, OpenSSL). Live verifiziert:
-- open/init (e1 04, e3-HELLO, b0, e0, a6-Liste) -> "open completion" ✓
-- Enroll-Bind: Windows-Hello-Finger auflegen -> a5 1110B-Token -> gebunden ✓
-- Verify/Identify: a5-Match -> "MATCH!" ✓ (kein Crash nach Double-Free-Fix)
-- delete/clear_storage: nur Host-Bindung, on-chip-Template bleibt.
+- diag_state.py after reboot: a6 = 0 records (store EMPTY), a5 = ff (no finger).
+  The 03 hang/freeze is gone -> sensor clean, but all fingerprints deleted
+  (due to a7-0100/a3 experiments + reboot). Therefore no more login.
+- Recovery paths: (A) set up Windows Hello anew [reliable];
+  (B) finish Linux Enroll on clean store [enroll_v21, a1v-MAC +
+  synthetic 28B SID, as there is no record to reuse].
+- IMPORTANT lesson: a7 0100 / a3-without-a4 alter the persistent store ->
+  in the future test ONLY with Enroll abort/recovery plan.
 
-Enroll = "Bind": neue Finger sind TPM-gebunden nicht anlernbar; man legt einen
-in Windows Hello angelernten Finger auf, der Chip matcht ihn, und der driver
-registriert das on-chip-Template als FpPrint. Danach Verify systemweit.
+---
 
-Build (nur dieser driver):
+# 47. FINAL Status Enroll: Capture + MAC resolved, a4 Commit Authorization open (2026-07-29)
+
+## Confirmed on clean/empty store
+- a4 [HMAC(sk,"enroll\0"||a1[1:33])] -> ff (as the ONLY formula; all others 9f).
+  => MAC formula correct (ff=MAC ok). ff is a commit postcondition, NOT
+  a consequence of the previously polluted state.
+- a1_response = a1 00 -> 33B; a1[1:33] (without status byte) is the MAC input.
+- Synthetic AND real SID -> both ff. So it's not the SID format.
+- Suspected cause of ff: identity authorization (GoodixSdcpVerifyAuthorizedIdentity)
+  or template completeness (our byte1 values remained ~0x01, Windows 0x32-0x64;
+  a3 was triggered at the 74-wall, possibly before full coverage 0x64).
+
+## SOLVED
+- SDCP session crypto (Section 36), Enroll capture (a3=00), a4 record structure,
+  a4 MAC formula (HMAC(sk,"enroll\0"||a1[1:33])).
+
+## OPEN (last building block)
+- a4 Commit Authorization (ff). Best solved by a FRESH
+  Windows Enroll capture on EMPTY store (shows exact a4 payload + identity
+  steps for initial enrollment). Alternatively: capture byte1 up to 0x64 (full coverage)
+  before a3, instead of aborting at the 74-wall.
+
+## IMPORTANT / Recovery
+- Store was emptied by the experiments (0 records) -> Login broken.
+  Recovery: set up finger in Windows Hello anew (restores Win+Linux).
+- a7 0100 / a3-without-a4 alter persistent store -> in the future test only with
+  recovery plan.
+
+---
+
+# 48. ★★★ NATIVE libfprint DRIVER WORKS (2026-07-30)
+
+scratch/libfprint_natasha/libfprint/drivers/goodixsdcp/ — new driver
+`goodixsdcp` (27c6:6f94), built on the goodixmoc skeleton, with our
+SDCP transport crypto (goodixsdcp_crypto.c, OpenSSL). Live verified:
+- open/init (e1 04, e3-HELLO, b0, e0, a6-list) -> "open completion" ✓
+- Enroll-Bind: place Windows Hello finger -> a5 1110B token -> bound ✓
+- Verify/Identify: a5 match -> "MATCH!" ✓ (no crash after double-free fix)
+- delete/clear_storage: only host binding, on-chip template remains.
+
+Enroll = "Bind": new fingers cannot be learned due to TPM binding; you place a
+finger learned in Windows Hello, the chip matches it, and the driver
+registers the on-chip template as FpPrint. Afterwards Verify system-wide.
+
+Build (only this driver):
   meson setup build -Ddrivers=goodixsdcp -Ddoc=false -Dintrospection=false -Dgtk-examples=false
   ninja -C build
-Test ohne fprintd: build/examples/enroll, build/examples/verify.
+Test without fprintd: build/examples/enroll, build/examples/verify.
 
-Nächster Step: systemweite Installation + fprintd/KDE-Einbindung + PAM.
+Next Step: system-wide installation + fprintd/KDE integration + PAM.
 
 ---
 
-# 49. ★★★ FERTIG: nativer driver systemweit + KDE/PAM integriert (2026-07-30)
+# 49. ★★★ FINISHED: native driver system-wide + KDE/PAM integrated (2026-07-30)
 
-Voll funktionsfähig und live bestätigt:
-- libfprint mit goodixsdcp nach /usr installiert (build-install, prefix /usr).
-- fprintd nutzt den driver: fprintd-enroll -> enroll-completed,
+Fully functional and live confirmed:
+- libfprint with goodixsdcp installed to /usr (build-install, prefix /usr).
+- fprintd uses the driver: fprintd-enroll -> enroll-completed,
   fprintd-verify -> verify-match.
-- KDE-System Settings -> users -> fingerprint: Registrierung + Nutzung
-  über die GUI funktioniert (bindet den Windows-Hello-Finger).
-- lock screen (Super+L) entsperrt per Finger ✓
-- sudo per Finger ✓ (pam_fprintd in /etc/pam.d/sudo)
-- LightDM-Login: pam_fprintd in /etc/pam.d/lightdm eingetragen.
-- Altes Python-pam_exec-Entsperren entfernt (sonst USB-Konflikt mit fprintd).
+- KDE System Settings -> users -> fingerprint: registration + usage
+  via the GUI works (binds the Windows Hello finger).
+- lock screen (Super+L) unlocks via finger ✓
+- sudo via finger ✓ (pam_fprintd in /etc/pam.d/sudo)
+- LightDM login: pam_fprintd added in /etc/pam.d/lightdm.
+- Old Python pam_exec unlocking removed (otherwise USB conflict with fprintd).
 
-## Modell / Limitations
-- Enroll neuer Finger ist TPM-gebunden -> nur in Windows Hello moeglich.
-  Der driver-"Enroll" ist ein BIND: on-chip-Template via a5-Match an FpPrint
-  binden. Verify/Identify/Match funktionieren nativ.
-- Der fprintd-Finger-Slot ist nur ein Etikett; der Sensor matcht jeden
-  registrierten on-chip-Finger (per-Finger-Unterscheidung ist lose).
+## Model / Limitations
+- Enroll of new fingers is TPM-bound -> only possible in Windows Hello.
+  The driver "Enroll" is a BIND: bind on-chip template via a5 match to FpPrint.
+  Verify/Identify/Match work natively.
+- The fprintd finger slot is just a label; the sensor matches any
+  registered on-chip finger (per-finger distinction is loose).
 
-## WARTUNG (wichtig)
-- Unser libfprint ersetzt das Distro-Paket in /usr. Ein pacman-Update von
-  'libfprint' ueberschreibt es -> danach neu bauen+installieren:
+## MAINTENANCE (important)
+- Our libfprint replaces the distro package in /usr. A pacman update of
+  'libfprint' overwrites it -> afterwards rebuild+install:
     cd ~/Projekte/Fingerprint/scratch/libfprint_natasha
     ninja -C build-install && sudo ninja -C build-install install
     sudo udevadm control --reload-rules && sudo udevadm trigger
     sudo systemctl restart fprintd
-  (Optional: 'libfprint' in /etc/pacman.conf unter IgnorePkg setzen.)
+  (Optional: put 'libfprint' in /etc/pacman.conf under IgnorePkg.)
 
-## Offene Politur (optional)
-- Verify-Retry im Fehlerfall feuert schnell (~250ms); Abhilfe: nach No-Match
-  auf Finger-Anheben warten, bevor der naechste a5 laeuft.
+## Open Polish (optional)
+- Verify retry in case of failure fires fast (~250ms); remedy: after no-match
+  wait for finger lift before the next a5 runs.
 
 ---
 
-# 50. Politur: No-Match wartet auf Finger-Anheben (2026-07-30)
+# 50. Polish: No-Match waits for finger lift (2026-07-30)
 
-Verify-SSM um Zustand GSDCP_VER_WAIT_LIFT erweitert: bei Match sofort fertig,
-bei No-Match wird FAIL gemeldet und dann per a2 (200ms-Poll) auf Finger-Anheben
-gewartet, bevor die Operation endet. Damit startet die nächste fprintd-Verify
-fresh/dynamic, statt im Fehlerfall alle ~250ms zu feuern.
-Neu bauen+installieren nötig:
+Verify-SSM extended by state GSDCP_VER_WAIT_LIFT: immediately done on match,
+on no-match FAIL is reported and then waits via a2 (200ms poll) for finger lift
+before the operation ends. This way the next fprintd-Verify starts
+fresh/dynamic, instead of firing every ~250ms in case of failure.
+Rebuild+install necessary:
     cd ~/Projekte/Fingerprint/scratch/libfprint_natasha
     ninja -C build-install && sudo ninja -C build-install install
     sudo systemctl restart fprintd
 
 ---
 
-# 51. NEUE HOFFNUNG fuer Enroll: TPM nur INITIAL noetig (2026-07-30)
+# 51. NEW HOPE for Enroll: TPM only INITIALly necessary (2026-07-30)
 
-Nutzer-Insight: Nur die ERSTE Fingerregistrierung braucht TPM; FOLGE-Finger
-gingen auch in der Windows-VM OHNE TPM. => 'ff' beim a4 ist keine harte
-TPM-Wand, sondern "Identitaet nicht als autorisiert erkannt". Sobald eine
-gueltige Identitaet on-chip existiert, sollte Hinzufuegen ohne TPM klappen.
-Der geleerte Speicher war vermutlich ein Sicherheits-Lockout nach zu vielen
-Fehlversuchen (keine Beschaedigung).
+User insight: Only the FIRST finger registration needs TPM; SUBSEQUENT fingers
+also worked in the Windows VM WITHOUT TPM. => 'ff' on a4 is not a hard
+TPM wall, but "identity not recognized as authorized". As soon as a
+valid identity exists on-chip, adding should work without TPM.
+The emptied memory was probably a security lockout after too many
+failed attempts (no damage).
 
-Nie sauber getestete Kombination: a7-Registrierung der ECHTEN Identitaet +
-HMAC(sk,"enroll\0"||a1[1:33]) + ECHTE SID auf BEFUELLTEM Speicher.
-enroll_v22.py macht genau das mit EINEM a4-Versuch (Lockout-Schutz).
+Never cleanly tested combination: a7 registration of the REAL identity +
+HMAC(sk,"enroll\0"||a1[1:33]) + REAL SID on FILLED memory.
+enroll_v22.py does exactly this with ONE a4 attempt (lockout protection).
 
 ---
 
-# 52. Enroll-Versuch beendet + Recovery; Projekt abgeschlossen (2026-07-30)
+# 52. Enroll attempt ended + Recovery; Project completed (2026-07-30)
 
-## Result des letzten Enroll-Versuchs (enroll_v22)
-Mit der Kombination a7-Identitaet + a1v-MAC + physical/real SID auf befuelltem Speicher:
-- Der Enroll-CAPTURE lief NICHT an (a0 blieb 000000), obwohl fprintd gestoppt
-  und der Finger fresh/dynamic war (a5 -> 01).
-- Die a6-Record-Zahl schwankte (3 -> 2) -> unsere a7/a4-Schreibzugriffe
-  veraendern den persistenten Template-Speicher; wiederholte Versuche loesen
-  einen Sicherheits-LOCKOUT aus (bestaetigt die Nutzer-Hypothese).
-=> In diesem Zustand ist der native Enroll nicht durchfuehrbar, und jeder
-   weitere Versuch gefaehrdet die funktionierenden (Windows-)Registrierungen.
-   ENTSCHEIDUNG: nativen Enroll nicht weiter verfolgen.
+## Result of the last Enroll attempt (enroll_v22)
+With the combination a7-identity + a1v-MAC + physical/real SID on filled memory:
+- The Enroll CAPTURE did NOT start (a0 remained 000000), although fprintd was stopped
+  and the finger was fresh/dynamic (a5 -> 01).
+- The a6 record count fluctuated (3 -> 2) -> our a7/a4 write accesses
+  alter the persistent template memory; repeated attempts trigger
+  a security LOCKOUT (confirms the user hypothesis).
+=> In this state the native Enroll is not feasible, and every
+   further attempt endangers the working (Windows) registrations.
+   DECISION: do not pursue native Enroll further.
 
-## Wichtige Betriebs-Insight
-- Sobald fprintd installiert/aktiv ist (fuer sudo/Login), GREIFT es auf den
-  Sensor zu und konkurriert mit den Python-Tools um das USB-Geraet -> wackelige
-  Resultse, -4-Error. Fuer Python-Experimente vorher: `sudo systemctl stop fprintd`,
-  danach wieder starten.
+## Important Operational Insight
+- As soon as fprintd is installed/active (for sudo/Login), it ACCESSES the
+  sensor and competes with the Python tools for the USB device -> shaky
+  results, -4 error. For Python experiments beforehand: `sudo systemctl stop fprintd`,
+  then start again afterwards.
 
-## Recovery (funktioniert zuverlaessig)
-Wenn der Speicher durch Experimente geleert/gesperrt wurde:
-1. Finger in Windows Hello neu anlernen (stellt on-chip-Templates wieder her).
-2. Unter Linux via KDE/fprintd erneut "registrieren" (= Bind an on-chip-Template).
--> lock screen-Entsperren + sudo per Finger wieder funktionsfaehig.
+## Recovery (works reliably)
+If the memory was emptied/locked by experiments:
+1. Re-learn finger in Windows Hello (restores on-chip templates).
+2. Under Linux via KDE/fprintd "register" again (= Bind to on-chip template).
+-> lock screen unlocking + sudo via finger working again.
 
-## Projekt-Endstand
-- Nativer libfprint-driver goodixsdcp: FERTIG (Verify/Identify/Bind + KDE/PAM).
-- Enroll neuer Finger: aus Linux nicht praktikabel (Lockout/Identitaets-
-  Autorisierung); Registrierung erfolgt in Windows Hello, danach Linux-Bind.
-- Alles dokumentiert (Sections 1-52), Release-Paket unter release/.
+## Project Final Status
+- Native libfprint driver goodixsdcp: FINISHED (Verify/Identify/Bind + KDE/PAM).
+- Enroll of new fingers: not practical from Linux (Lockout/Identity
+  Authorization); registration takes place in Windows Hello, then Linux Bind.
+- Everything documented (Sections 1-52), release package under release/.
