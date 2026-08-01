@@ -1,0 +1,14 @@
+# Goodix GF3268 (Windows Hello / SDCP) Fingerprint-Sensor, 27c6:6f94
+#
+# USB-Autosuspend fuer den Sensor deaktivieren, damit er nach Standby/Resume
+# sofort einsatzbereit ist. Ohne das legt der Kernel den Sensor schlafen; beim
+# Aufwachen ist er kurz nicht bereit -> fprintd/kscreenlocker desynchronisieren
+# ("Nutzung des Geraetes wurde vorher nicht angefragt") und es wird ein
+# Fehlversuch registriert, der die Lockscreen-Sperre ausloesen kann.
+#
+# Installation:
+#   sudo cp 60-goodix-gf3268-fp.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#   (danach Sensor einmal ab-/anmelden oder neu starten)
+
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="27c6", ATTR{idProduct}=="6f94", ATTR{power/control}="on", ATTR{power/autosuspend_delay_ms}="-1"

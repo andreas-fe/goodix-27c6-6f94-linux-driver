@@ -1,0 +1,21 @@
+# Optionaler Resume-Hook: fprintd nach Standby/Resume frisch neu starten,
+# damit das Geraet sauber neu geoeffnet wird und keine desynchronisierte
+# Session vom Zeitpunkt vor dem Standby zurueckbleibt.
+#
+# Nur noetig, falls die udev-Autosuspend-Regel allein das Problem nicht loest.
+#
+# Installation:
+#   sudo cp fprintd-resume.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable fprintd-resume.service
+
+[Unit]
+Description=Restart fprintd after resume (Goodix GF3268 readiness)
+After=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl restart fprintd.service
+
+[Install]
+WantedBy=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target

@@ -33,10 +33,12 @@ G_DECLARE_FINAL_TYPE (FpiDeviceGoodixSdcp, fpi_device_goodixsdcp, FPI,
 #define GSDCP_TID_SIZE    16
 #define GSDCP_SID_MAXLEN  40
 
-/* Command SSM: send -> receive (skipping ACKs). */
+/* Command SSM: send -> receive (skipping ACKs); pause/continue on suspend. */
 typedef enum {
   GSDCP_CMD_SEND = 0,
   GSDCP_CMD_RECV,
+  GSDCP_CMD_SUSPENDED,       /* parked while the system is suspended */
+  GSDCP_CMD_RESUME,          /* re-issue the read after resume */
   GSDCP_CMD_NUM_STATES,
 } GsdcpCmdState;
 

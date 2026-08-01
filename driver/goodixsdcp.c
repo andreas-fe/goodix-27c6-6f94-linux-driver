@@ -66,6 +66,13 @@ struct _FpiDeviceGoodixSdcp
   gboolean        cmd_cancelable;
   guint8          seq;
   GPtrArray      *list_result;   /* on-chip template records -> FpPrint */
+
+  /* Suspend/resume: our own cancellable for the long "wait for finger" reads,
+   * so we can pause the read across a system suspend and re-issue it on resume
+   * (without libfprint cancelling the whole verify with "Cannot run while
+   * suspended"). Also used for user-initiated cancel. */
+  GCancellable   *cancel;
+  gboolean        suspended;
 };
 
 G_DEFINE_TYPE (FpiDeviceGoodixSdcp, fpi_device_goodixsdcp, FP_TYPE_DEVICE)
@@ -169,6 +176,15 @@ cmd_receive_cb (FpiUsbTransfer *transfer, FpDevice *device,
 
   if (error)
     {
+      /* A read cancelled because the system is suspending: park the command
+       * SSM (don't fail the verify). It is re-issued from GSDCP_CMD_RESUME. */
+      if (self->suspended &&
+          g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+        {
+          g_error_free (error);
+          fpi_ssm_jump_to_state (transfer->ssm, GSDCP_CMD_SUSPENDED);
+          return;
+        }
       fpi_ssm_mark_failed (transfer->ssm, error);
       return;
     }
@@ -220,10 +236,27 @@ cmd_run_state (FpiSsm *ssm, FpDevice *dev)
       transfer = fpi_usb_transfer_new (dev);
       transfer->ssm = ssm;
       fpi_usb_transfer_fill_bulk (transfer, EP_IN, EP_IN_BUF);
+      /* Long "wait for finger" reads use our own cancellable so we can pause
+       * them on suspend (and cancel them on user request); short protocol
+       * reads are not cancellable. */
       fpi_usb_transfer_submit (transfer,
                                self->cmd_cancelable ? FINGER_TIMEOUT : RECV_TIMEOUT,
-                               self->cmd_cancelable ? fpi_device_get_cancellable (dev) : NULL,
+                               self->cmd_cancelable ? self->cancel : NULL,
                                cmd_receive_cb, fpi_ssm_get_data (ssm));
+      break;
+
+    case GSDCP_CMD_SUSPENDED:
+      /* Parked while the system is suspended. Tell libfprint the suspend is
+       * configured (NULL error => the verify keeps running after resume, so
+       * libfprint does NOT cancel it). The SSM waits here until dev_resume
+       * jumps it to GSDCP_CMD_RESUME. */
+      fpi_device_suspend_complete (dev, NULL);
+      break;
+
+    case GSDCP_CMD_RESUME:
+      /* Woke up: acknowledge the resume and re-issue the finger read. */
+      fpi_device_resume_complete (dev, NULL);
+      fpi_ssm_jump_to_state (ssm, GSDCP_CMD_RECV);
       break;
     }
 }
@@ -590,6 +623,10 @@ dev_verify_identify (FpDevice *device)
 {
   FpiDeviceGoodixSdcp *self = FPI_DEVICE_GOODIXSDCP (device);
 
+  self->suspended = FALSE;
+  g_clear_object (&self->cancel);
+  self->cancel = g_cancellable_new ();
+
   self->task_ssm = fpi_ssm_new (device, verify_run_state, GSDCP_VER_NUM_STATES);
   fpi_ssm_start (self->task_ssm, verify_ssm_done);
 }
@@ -696,6 +733,10 @@ dev_enroll (FpDevice *device)
 {
   FpiDeviceGoodixSdcp *self = FPI_DEVICE_GOODIXSDCP (device);
 
+  self->suspended = FALSE;
+  g_clear_object (&self->cancel);
+  self->cancel = g_cancellable_new ();
+
   self->task_ssm = fpi_ssm_new (device, enroll_run_state, GSDCP_VER_NUM_STATES);
   fpi_ssm_start (self->task_ssm, enroll_ssm_done);
 }
@@ -755,6 +796,70 @@ static const FpIdEntry id_table[] = {
   { .vid = 0, .pid = 0, .driver_data = 0 },
 };
 
+/* ------------------------------------------------------ suspend / resume */
+
+/* User-initiated cancel: cancel the pending finger read. */
+static void
+dev_cancel (FpDevice *device)
+{
+  FpiDeviceGoodixSdcp *self = FPI_DEVICE_GOODIXSDCP (device);
+
+  if (self->cancel)
+    g_cancellable_cancel (self->cancel);
+}
+
+/* System is about to suspend. If we are inside a cancellable finger read
+ * (verify/identify/enroll waiting for a finger), pause it cleanly: cancel the
+ * read, which lands in GSDCP_CMD_SUSPENDED and completes the suspend with a
+ * NULL error so libfprint keeps the action alive across the sleep. In any
+ * other situation we cannot pause, so we decline (NOT_SUPPORTED); libfprint
+ * then cancels the running action, which is the pre-existing behaviour. */
+static void
+dev_suspend (FpDevice *device)
+{
+  FpiDeviceGoodixSdcp *self = FPI_DEVICE_GOODIXSDCP (device);
+  FpiDeviceAction action = fpi_device_get_current_action (device);
+
+  if ((action == FPI_DEVICE_ACTION_VERIFY ||
+       action == FPI_DEVICE_ACTION_IDENTIFY ||
+       action == FPI_DEVICE_ACTION_ENROLL) &&
+      self->cmd_ssm && self->cmd_cancelable && self->cancel)
+    {
+      self->suspended = TRUE;
+      g_cancellable_cancel (self->cancel);
+      /* fpi_device_suspend_complete() is called from GSDCP_CMD_SUSPENDED once
+       * the cancelled read has unwound. */
+    }
+  else
+    {
+      fpi_device_suspend_complete (device,
+                                   fpi_device_error_new (FP_DEVICE_ERROR_NOT_SUPPORTED));
+    }
+}
+
+/* System resumed. Re-arm the finger read with a fresh cancellable and let the
+ * paused command SSM continue. */
+static void
+dev_resume (FpDevice *device)
+{
+  FpiDeviceGoodixSdcp *self = FPI_DEVICE_GOODIXSDCP (device);
+
+  if (self->suspended && self->cmd_ssm &&
+      fpi_ssm_get_cur_state (self->cmd_ssm) == GSDCP_CMD_SUSPENDED)
+    {
+      self->suspended = FALSE;
+      g_clear_object (&self->cancel);
+      self->cancel = g_cancellable_new ();
+      /* GSDCP_CMD_RESUME calls fpi_device_resume_complete() and re-issues. */
+      fpi_ssm_jump_to_state (self->cmd_ssm, GSDCP_CMD_RESUME);
+    }
+  else
+    {
+      self->suspended = FALSE;
+      fpi_device_resume_complete (device, NULL);
+    }
+}
+
 static void
 fpi_device_goodixsdcp_init (FpiDeviceGoodixSdcp *self)
 {
@@ -767,6 +872,7 @@ fpi_device_goodixsdcp_finalize (GObject *object)
 
   if (self->list_result)
     g_ptr_array_free (self->list_result, TRUE);
+  g_clear_object (&self->cancel);
   G_OBJECT_CLASS (fpi_device_goodixsdcp_parent_class)->finalize (object);
 }
 
@@ -795,6 +901,9 @@ fpi_device_goodixsdcp_class_init (FpiDeviceGoodixSdcpClass *klass)
   dev_class->list     = dev_list;
   dev_class->delete   = dev_delete;
   dev_class->clear_storage = dev_clear_storage;
+  dev_class->cancel   = dev_cancel;
+  dev_class->suspend  = dev_suspend;
+  dev_class->resume   = dev_resume;
 
   fpi_device_class_auto_initialize_features (dev_class);
   dev_class->features |= FP_DEVICE_FEATURE_DUPLICATES_CHECK;
