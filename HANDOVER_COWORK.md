@@ -2491,3 +2491,54 @@ If the memory was emptied/locked by experiments:
 - Enroll of new fingers: not practical from Linux (Lockout/Identity
   Authorization); registration takes place in Windows Hello, then Linux Bind.
 - Everything documented (Sections 1-52), release package under release/.
+
+
+---
+
+# 53. Standby/Resume Fix (2026-07-31)
+
+Symptom: After standby, the fingerprint sensor does not unlock; fprintd log shows "Authorization denied ... EnrollStop/Release ... Use of the device was not requested beforehand" + registered failed attempt (can lock the lockscreen).
+
+Cause: USB autosuspend puts the sensor to sleep; upon resume, it is briefly unready -> fprintd/kscreenlocker session desynchronizes.
+
+Fix (release/system/):
+- `60-goodix-gf3268-fp.rules`: USB autosuspend disabled for 27c6:6f94 (power/control=on).
+  -> `/etc/udev/rules.d/`, `udevadm reload+trigger`.
+- `fprintd-resume.service` (optional): Restart fprintd on resume.
+Details + Test: `release/system/README.md`.
+
+Addendum: The udev rule alone did NOT solve it. After several hours of standby, only password login was possible at the lockscreen (after which everything was okay again). System suspend (S3) puts the USB bus completely to sleep, regardless of the autosuspend setting -> the rule doesn't apply here. The real cause + fix: 54.
+
+---
+
+# 54. Standby Fix: Root Cause + Driver Suspend/Resume (2026-08-01)
+
+Descriptive log during failed unlock:
+  `fprintd: Device reported an error during identify: Cannot run while suspended.`
+  `kscreenlocker: ReleaseDevice failed: The device is still busy with another operation`
+  -> followed by multiple "Authentication attempt too soon" -> pam_faillock briefly locks the account.
+
+Cause (verified in libfprint source code):
+- When closing the lid, a Verify action is already running on the lock screen (waiting for finger).
+- libfprint then calls the driver's suspend vfunc. Our driver had NONE -> `fpi_device_suspend()` takes the else branch: `fpi_device_suspend_complete(dev, NOT_SUPPORTED)`.
+- `fpi_device_suspend_complete()` (`fpi-device.c`) ALWAYS sets `is_suspended=TRUE` and, because an error != NULL was passed AND a task is running, additionally sets `current_cancellation_reason = "Cannot run while suspended."` + cancels the action.
+- The `is_suspended` flag was not cleanly reset (missing resume vfunc / resume signal race), so the next Verify was rejected with this exact message and the device remained "busy".
+
+Fix (in driver `goodixsdcp.c`, `.h`):
+- New vfuncs: `dev_suspend`, `dev_resume`, `dev_cancel` (wired up in `class_init`).
+- Dedicated `GCancellable` `self->cancel` for the long "wait for finger" reads (instead of `fpi_device_get_cancellable`). `dev_cancel` cancels it -> all libfprint abort paths reach the read (`setup_task_cancellable` only connects `current_cancellable` to `cls->cancel` if the vfunc exists; exactly the pattern of `fpcmoc`/`synaptics`).
+- Command SSM extended by two states: `GSDCP_CMD_SUSPENDED` / `GSDCP_CMD_RESUME`.
+- `dev_suspend` (only during cancelable finger read): `self->suspended=TRUE`, `g_cancellable_cancel(self->cancel)`. The cancelled read lands in `cmd_receive_cb` -> (suspended && CANCELLED) -> jump `GSDCP_CMD_SUSPENDED` -> `fpi_device_suspend_complete(dev, NULL)`. NULL instead of an error is the key: according to the API, NULL means "action continues after resume" -> libfprint does NOT set a "Cannot run while suspended" abort reason.
+- `dev_resume`: fresh `self->cancel`, jump `cmd_ssm` -> `GSDCP_CMD_RESUME` -> `fpi_device_resume_complete(dev, NULL)` (clears `is_suspended`) + jump `RECV` (re-arm the read). Fallback branch calls `resume_complete` even if we were not cleanly paused -> flag is cleared in any case.
+
+This fixes "Cannot run while suspended" at the root, without udev/systemd.
+Tested: Framing/Balance OK; real build+standby test on the target machine.
+
+Residual Risk (documented, still open): If the sensor loses its transport session during a VERY long S3 suspend, the re-armed `a2` read would silently hang (different symptom than "Cannot run while suspended"). Follow-up would be to first replay the handshake (POV/HELLO2/HELLO0/CAL/PSK) in the resume path. However, the failed attempt in the log was a libfprint rejection (sensor not contacted at all), which suggests that the session survives and the flag fix is sufficient.
+
+Validation on hardware (2026-08-01):
+- Build+Install OK, fprintd restarted.
+- Real test: Screen locked -> System Suspend -> woken up -> placed finger on lock screen -> unlocked on the FIRST attempt, without password fallback.
+- `journalctl -u fprintd`: NO more "Cannot run while suspended"; only normal on-demand Start/Deactivate. -> Fix confirmed.
+- Note: `sudo fprintd-verify` checks the prints of the root user (empty -> NoEnrolledPrints); for isolated testing, use `fprintd-verify` without sudo or `fprintd-verify andreas`. Not a driver issue.
+- The residual risk (session loss during very long suspend) did NOT occur.
