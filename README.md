@@ -1,6 +1,6 @@
 # Goodix GF3268 (USB ID 27c6:6f94) — Native Linux Fingerprint Driver & Protocol Analysis
 
-A native `goodixsdcp` driver for **libfprint**, with protocol research and an experimental Linux enrollment client, supporting the **Goodix GF3268** fingerprint sensor (USB ID `27c6:6f94`), commonly found in laptops like the **Honor MagicBook Art 14**.
+A native `goodixsdcp` driver for **libfprint**, with native new-finger enrollment and protocol research, supporting the **Goodix GF3268** fingerprint sensor (USB ID `27c6:6f94`), commonly found in laptops like the **Honor MagicBook Art 14**.
 
 The driver integrates seamlessly into **fprintd** for system-wide authentication across Linux desktop environments (KDE Settings, GNOME Settings, Lock Screen, Display Manager Login, `sudo`, `pam_fprintd`).
 
@@ -11,13 +11,12 @@ The driver integrates seamlessly into **fprintd** for system-wide authentication
 | Feature              | Status | Protocol / Mechanism                              |
 |----------------------|--------|--------------------------------------------------|
 | Verify / Identify    | ✅     | `a5` SDCP Match-on-Chip (hardware template match) |
-| Enroll (Host Bind)   | ✅     | Touch a stored finger → match → bind `FpPrint` |
-| List / Delete        | ✅     | `a6` Template List / Host-side template unbinding |
+| Enroll NEW Finger    | ✅ Tested | Native C SDCP capture → Type-4 commit → `FpPrint`; firmware `01010032` |
+| List / Delete        | ✅ / See scope | `a6` list; targeted `a7/02` deletion with preservation checks (deletion simulated, GUI deletion not yet hardware-tested) |
 | Desktop & PAM        | ✅     | Lock Screen, `sudo`, Login, GUI Enrollment        |
-| Enroll NEW Finger    | ✅ Experimental | Python SDCP capture/commit → native C host bind; firmware `01010032` |
 | Empty-Store Provisioning | ⏳ Open | Existing valid Type-4 identity still required |
 
-> **Enrollment update — 2026-11-09:** A previously unregistered finger was captured and stored under Linux, matched over fresh SDCP connections, bound through fprintd and verified successfully. The original fingerprint remained functional and an unregistered control finger was rejected. This supersedes the previous blanket TPM-only conclusion. The new Python capture/commit client requires an existing Type-4 identity; the C driver still performs **Host Bind**. Empty-store provisioning and a reboot/cold-start test remain open. See the [complete enrollment guide](docs/NATIVE_ENROLLMENT.md) and [hardware test report](docs/HARDWARE_TEST_REPORT_2026-11.md).
+> **Native enrollment update — 2026-11-09:** A new finger was enrolled directly in **KDE System Settings** using the installed C driver, then accepted by `fprintd-verify`. The original right thumb still verified. No Python capture or separate host bind is needed for new enrollment. Existing Type-4 identity metadata is still required. Empty-store provisioning and reboot/cold-start validation remain open. See the [enrollment guide](docs/NATIVE_ENROLLMENT.md), [native integration details](docs/NATIVE_DRIVER_INTEGRATION.md) and [hardware report](docs/HARDWARE_TEST_REPORT_2026-11.md).
 
 ---
 
@@ -25,29 +24,20 @@ The driver integrates seamlessly into **fprintd** for system-wide authentication
 
 **Hardware-validated on GF3268 firmware `01010032` (2026-11-09).** No Windows session or TPM operation was needed for the additional finger; the existing on-chip identity metadata was reused.
 
-The workflow is **Python capture/commit → target-specific match → existing C-driver bind → fprintd verify**:
+Use **KDE System Settings → Users → Fingerprint** with the newly built/installed driver. Select an unused finger slot and follow the prompts, lifting and repositioning the finger between captures. The driver accepts thirteen updates; fprintd adds one duplicate precheck, so the standard interface reports fourteen stages.
+
+The same operation is available through standard fprintd commands:
 
 ```bash
-# Run from this repository's root; standalone tools need exclusive USB access.
-# SDCP requires privately configured GOODIX_AES_KEY and GOODIX_MAC_KEY; see the guide.
-python3 scripts/goodix_probe.py --live --list
-python3 experiments/goodix_sdcp_trial.py --session-check
-
-mkdir -p experiments/private
-chmod 700 experiments/private
-python3 experiments/goodix_sdcp_trial.py --enroll \
-  --reference experiments/private/new-finger.json
-python3 experiments/goodix_match_trial.py \
-  --target-reference experiments/private/new-finger.json.commit.json
-
-# After the standalone tool exits, bind and verify the stored finger:
-fprintd-enroll -f right-little-finger
-fprintd-verify -f right-little-finger
+# Choose a genuinely new finger and a free slot.
+fprintd-enroll -f right-index-finger
+fprintd-verify -f right-index-finger
+fprintd-list "$USER"
 ```
 
-Read the [full guide](docs/NATIVE_ENROLLMENT.md), including its transport-key setup, before running enrollment. The public release keeps static transport keys redacted; zero placeholders cannot operate the encrypted sensor channel. The firmware guard, existing-record prerequisite, one-commit policy and private metadata files are deliberate. Do not retry an uncertain commit blindly or run old `a7` “authorization” experiments: that command deletes records.
+The public C source retains redacted static transport keys. Configure those locally before building; exporting the Python key variables does not configure C. See the [key setup](docs/NATIVE_ENROLLMENT.md#public-transport-key-setup-required-for-sdcp) and installation instructions below. The Python tools remain available for protocol research; the standard desktop workflow does not invoke them.
 
-**Validation:** new little finger `verify-match`; unregistered ring finger no match; original thumb still `verify-match`. **40 offline tests pass.** The native C enrollment path has not yet been extended to collect new templates itself. No empty-store or cold-boot success is claimed.
+**Hardware validation:** KDE completed all thirteen native captures and enrollment; the new finger and original thumb both returned `verify-match`. **51 Python tests and 13 native driver simulations pass.** The native lifecycle simulations use the actual libfprint API with fake USB responses; they are distinct from the hardware test. No empty-store or cold-boot success is claimed.
 
 ---
 
@@ -60,7 +50,7 @@ Read the [full guide](docs/NATIVE_ENROLLMENT.md), including its transport-key se
 ├── driver/                   # Native libfprint C driver implementation
 │   ├── goodixsdcp.c          # GObject device class, SSM state machine, verify/enroll
 │   ├── goodixsdcp.h          # Driver structure & state definitions
-│   ├── goodixsdcp_crypto.c   # Transport encryption (AES-128-CBC + HMAC-SHA256)
+│   ├── goodixsdcp_crypto.c   # Transport crypto + fresh ECDH/SDCP enrollment keys
 │   └── goodixsdcp_crypto.h   # Framing constants & crypto function prototypes
 ├── protocol/                 # Reference Python implementations & diagnostic tools
 │   ├── goodix_crypto.py      # Session crypto & framing reference
@@ -72,9 +62,9 @@ Read the [full guide](docs/NATIVE_ENROLLMENT.md), including its transport-key se
 │   ├── emulate_ki.py         # Unicorn engine master key & session key emulation
 │   └── re_tools/             # PE / pcapng / pdata analysis scripts
 ├── docs/                     # Native enrollment guide & November hardware report
-├── scripts/                  # Read-only metadata probe
+├── scripts/                  # Probe, native test runner & protected local installer
 ├── experiments/              # Guarded SDCP enrollment, match checker & diagnostic MOC patch
-├── tests/                    # 40 offline checks for the experimental tools
+├── tests/                    # Python tests + native C lifecycle simulation
 ├── captures/                 # Protocol traffic captures
 │   ├── goodix_handshake_and_enroll.pcapng
 │   └── goodix_unlock_success.pcapng
@@ -86,7 +76,7 @@ Read the [full guide](docs/NATIVE_ENROLLMENT.md), including its transport-key se
 
 ## 🛠️ Building & Installing the Driver
 
-The driver is designed to be integrated into an existing `libfprint` source tree.
+The driver is designed to be integrated into an existing `libfprint` source tree. Configure its private transport-key constants locally first. This implementation uses OpenSSL 3 APIs; install the corresponding development dependencies. No ready-to-use private-key binary is published.
 
 ### 1. Fetch `libfprint` Sources
 ```bash
@@ -138,7 +128,7 @@ cp /path/to/driver/*.h libfprint/drivers/goodixsdcp/
 ```bash
 meson setup build -Ddrivers=goodixsdcp -Ddoc=false -Dintrospection=false -Dgtk-examples=false
 ninja -C build
-sudo ./build/examples/enroll     # Touch an already stored finger -> binds template
+sudo ./build/examples/enroll     # Capture a NEW finger with thirteen accepted updates
 sudo ./build/examples/verify     # Touch finger -> verify-match
 ```
 
@@ -164,7 +154,7 @@ Configure PAM via `/etc/pam.d/` (`auth sufficient pam_fprintd.so`) or enroll fin
 
 ## 🔬 Protocol & Reverse Engineering Highlights
 
-The full reverse-engineering journey is documented chronologically in `HANDOVER_COWORK.md` (Sections 1–60; the latest corrections are in Sections 55–60):
+The full reverse-engineering journey is documented chronologically in `HANDOVER_COWORK.md` (Sections 1–63; the latest protocol corrections and integration are in Sections 55–63):
 
 1. **Transport Encryption:** Custom GTLS framing layer (`MAC (32B) + Header (01 FF) + Length (4B) + IV (16B) + Ciphertext`). Uses AES-128-CBC and HMAC-SHA256. Verified 159/159 against captured USB traffic.
 2. **SDCP Handshake:** ECDH (P-256) + SP 800-108 Counter-Mode KDF (SHA-256). Reconstructed via disassembly of `GoodixMocSensorAdapter.dll` and live execution (`sdcp_capture.py`, `sdcp_session.py`).
@@ -176,5 +166,5 @@ The full reverse-engineering journey is documented chronologically in `HANDOVER_
 
 - **fprintd vs Python Tools:** Standalone tools require exclusive access to the USB interface. Finish other fingerprint operations first. If fprintd owns the interface, stop it before standalone testing and restore it afterward; the new tools do not manage services automatically. Do not stop the only working authentication path without retaining password access.
 - **Private enrollment references:** `experiments/private/` is ignored by Git. Before/commit/after files contain sensitive identifiers and identity metadata; do not publish them. They are not raw fingerprint images.
-- **Experimental scope:** Additional enrollment is tested on firmware `01010032` with an existing Type-4 record. The client checks server key confirmation and reconnect MACs, but does not implement the complete Windows attestation/credential-release model.
+- **Experimental scope:** Additional enrollment is tested on firmware `01010032` with an existing Type-4 record. The native enrollment path checks server key confirmation and reconnect MACs, but does not implement the complete Windows attestation/credential-release model.
 - **System Updates:** Upgrading your distribution's `libfprint` package will overwrite `/usr/lib/libfprint-2.so`. Simply rebuild and re-install (Step 5) after system upgrades, or add `libfprint` to `IgnorePkg` in `/etc/pacman.conf`.

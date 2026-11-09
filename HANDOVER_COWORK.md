@@ -2,9 +2,9 @@
 
 > ## ✅ CURRENT HARDWARE-VALIDATED STATE — 2026-11-09
 > **Additional new fingerprints can now be captured and committed under Linux.**
-> See **Sections 55–60**, [Native Linux Enrollment](docs/NATIVE_ENROLLMENT.md) and the [Hardware Test Report](docs/HARDWARE_TEST_REPORT_2026-11.md).
+> See **Sections 55–63**, [Native Linux Enrollment](docs/NATIVE_ENROLLMENT.md) and the [Hardware Test Report](docs/HARDWARE_TEST_REPORT_2026-11.md).
 > The old TPM-only conclusion, `a7` identity-registration interpretation, `a0=000000` “no frame” interpretation and `74` completion heuristic are superseded.
-> The C driver's enrollment operation remains host bind; the new capture/commit path is an experimental Python tool. Empty-store provisioning and cold-start validation remain open.
+> **Native C integration is now hardware-validated through KDE.** New capture/commit runs inside libfprint; separate Python capture and host bind are no longer required. New-finger and original-thumb standard verification passed. Empty-store provisioning, cold-start validation and live GUI deletion remain open. Sections 55–60 retain the preceding Python experiment chronology.
 
 > ## ⚠️ ATTENTION: Sections 1–9 of this document are HISTORICAL / REFUTED
 > They describe a TLS-PSK handshake using `openssl s_client` as a proxy.
@@ -2615,13 +2615,13 @@ These findings explain why the old loops could continue merging after Windows wo
 
 # 57. Regular goodixmoc investigated without storage repair (2026-11-08)
 
-A newer external hardware report described regular-goodixmoc enrollment for the same USB ID on a different Honor model/firmware. Rather than installing it directly, a separate build was prepared against the project's libfprint1.94.5 baseline.
+A newer external hardware report described regular-goodixmoc enrollment for the same USB ID on a different Honor model/firmware. Rather than installing it directly, a separate build was prepared against the project's libfprint 1.94.5 baseline.
 
 The regular parser successfully decoded the saved GF3268 version, list, match and enrollment-init responses. This justified testing the shared protocol while preserving the installed driver.
 
 ## Isolation
 
-- Only PID6f94 exposed; firmware01010032 required.
+- Only PID6f94 exposed; firmware 01010032 required.
 - USB reset in probe/open skipped.
 - C0 configuration writes and A7 deletion blocked centrally before transfer creation.
 - No automatic reset after a list error.
@@ -2733,3 +2733,51 @@ The successful hardware tests used locally configured transport keys. Public AES
 The public SDCP client rejects missing/zero/invalid keys before live USB use. Read-only metadata probing needs no keys. The vendor emulator now resolves its helpers through `protocol/re_tools` and accepts `GOODIX_SENSOR_ADAPTER_DLL`; offline derivation from the compatible local DLL reproduced both working keys without publishing them. These are build-specific vendor constants, not TPM-exported secrets.
 
 The final public suite has **40 passing tests**, including the38 original experiment checks and two public key-configuration guards. Offline synthetic-peer tests do not prove sensor operation with redacted placeholders. Full setup details are in the enrollment guide.
+
+
+---
+
+# 61. Native C SDCP enrollment replaces host bind (2026-11-09)
+
+The successful Python flow was ported into the native `goodixsdcp` driver. New enrollment now validates firmware 01010032 and the initial record list, establishes fresh P-256 SDCP sessions with key confirmation, checks reconnect MACs before captures, collects thirteen accepted updates using the five/eight phases, checks duplication, commits exactly once and verifies the added record with unchanged originals.
+
+The returned FpPrint uses the sensor-assigned account field found through the enrollment MAC. Existing host-print representation remains compatible. No Python subprocess or separate bind command is involved. Existing Type-4 identity metadata remains a prerequisite; empty-store provisioning is not implemented.
+
+Transport handling now validates CRCs, assembles fragmented responses and finishes command ownership before dispatching the next callback. Cancellation disables the shield and clears session material. A commit is never automatically repeated; matching readback may recover a lost response. Verify/identify keep the resume path; enrollment cancels across suspend.
+
+Deletion is now a targeted `a7/02` count 1+record operation with preservation readback. Unclaimed device-only records are refused to prevent fprintd garbage collection from erasing Windows/device-only entries. Clear-storage is not advertised. Live GUI deletion is still untested; thirteen native simulations cover deletion and the other lifecycle cases.
+
+Full design, guards, tests and install/rollback procedure: [Native Driver Integration](docs/NATIVE_DRIVER_INTEGRATION.md).
+
+---
+
+# 62. KDE precheck failure fixed, then native enrollment passed (2026-11-09)
+
+Before native capture, fprintd performs an identify precheck. The first KDE attempts reached a correct no-match result but the old verify/identify implementation then entered its lift-wait state. That read timed out and tried to report identify twice. No native enrollment commit occurred during those attempts.
+
+The corrected path reports no match once and completes immediately. A regression invokes the actual identify API and requires exactly one acquisition read, no commit and unchanged storage. After reinstalling the corrected library, the user reopened KDE and enrolled a new finger in a free `right-index-finger` slot.
+
+All thirteen native stages passed; the service reported `enroll-completed`. Readback completion requires exactly one new record and byte-for-byte preservation of the two original records. fprintd listed right-index-finger, right-little-finger and right-thumb.
+
+Two subsequent standard checks, using the freshly enrolled finger and the original thumb respectively:
+
+```text
+fprintd-verify -f right-index-finger → verify-match (done)
+fprintd-verify -f right-thumb        → verify-match (done)
+```
+
+The native build was installed system-wide after operating-system administrator authentication. The old library and references were backed up privately. No PAM changes, Windows/TPM operation, external capture client or separate host-bind command was used for the new KDE enrollment.
+
+---
+
+# 63. Current integration handover and validation boundary (2026-11-09)
+
+**Current normal workflow:** Build/install the updated privately configured C driver, then use KDE or standard `fprintd-enroll`. Existing fingerprints remain compatible. The former Python+bind instructions are historical research, not the current standard enrollment procedure.
+
+**Passed:** 51 public Python tests (40 protocol/tool checks, eight actual C crypto checks and three installer checks),13 actual-driver simulations, two libfprint test suites, native build/API preservation, hardware open/list/no-finger cancellation, KDE new enrollment and standard verification of the new finger and original thumb. Initial crypto acceptance/USB are simulated in lifecycle tests; separate crypto tests use actual C against an independent synthetic peer.
+
+**Not claimed:** Cold-start/reboot persistence, a fresh native-build suspend test, live targeted GUI deletion/re-enrollment, empty-store provisioning, support for other firmware, complete attestation or full match-token verification. A post-commit failure can leave a device record without a host reference; uncertain commits must not be blindly repeated or “repaired” by clearing storage.
+
+**Public export:** Actual C implementation and tests are included. AES/HMAC constants remain intentionally redacted; no working-key binaries, sensor snapshots, real SIDs/account IDs/enrollment IDs or vendor DLLs are published. The optional protected installer expects a locally built library and is specific to the documented Arch/CachyOS paths. Distribution upgrades can replace the custom library.
+
+This section supersedes the “native C integration remains open” limitation in historical Section 60. Additional enrollment is now demonstrated through the operating-system standard UI and API. Initial provisioning remains a separate research question.

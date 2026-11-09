@@ -18,6 +18,7 @@
 #pragma once
 
 #include <glib.h>
+#include <openssl/evp.h>
 
 G_BEGIN_DECLS
 
@@ -85,5 +86,24 @@ gssize gsdcp_decrypt (const guint8 *inner,
  * Used to tell encrypted responses from plaintext ones.
  */
 gboolean gsdcp_is_encrypted (const guint8 *inner, gsize inner_len);
+
+/* Fresh SDCP state. No persistent keys or biometric data are stored here. */
+typedef struct {
+  EVP_PKEY *private_keys[2];
+  guint8 nonce[32];
+  guint8 key[32];
+  gboolean valid;
+} GsdcpSession;
+
+void gsdcp_session_clear (GsdcpSession *session);
+gboolean gsdcp_random (guint8 *out, gsize len);
+gboolean gsdcp_session_start (GsdcpSession *session, guint8 hello[162]);
+gboolean gsdcp_session_accept (GsdcpSession *session,
+                              const guint8 *reply, gsize reply_len);
+gboolean gsdcp_session_mac (const GsdcpSession *session, const gchar *label,
+                           const guint8 *data, gsize len, guint8 out[32]);
+gboolean gsdcp_session_check_reconnect (const GsdcpSession *session,
+                                       const guint8 nonce[32],
+                                       const guint8 *reply, gsize len);
 
 G_END_DECLS

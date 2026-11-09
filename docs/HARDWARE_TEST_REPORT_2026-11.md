@@ -6,6 +6,8 @@
 
 The existing fingerprint remained usable. An unregistered control finger was rejected. This report records the successful result and the intermediate failures so that future work does not repeat the earlier incorrect TPM/lockout assumptions.
 
+**Later native integration:** KDE subsequently completed a new enrollment entirely through the updated C driver. New-finger and original-thumb fprintd verification passed. See Section 9 below; Sections 1–8 retain the earlier Python experiment chronology.
+
 ---
 
 ## 1. Initial State and Scope
@@ -198,7 +200,7 @@ Still open:
 - Reboot/cold-start persistence test.
 - Recognition-rate and failure-recovery testing beyond this session.
 - Empty-store provisioning.
-- Native C-driver capture/commit integration.
+- Native C-driver capture/commit integration was completed later in this session; see Section 9.
 - Firmware variants beyond01010032.
 - Complete certificate-chain/firmware attestation and match-token verification.
 
@@ -207,3 +209,51 @@ For the runnable workflow and protocol details, see [Native Linux Enrollment](NA
 ## Public Reproduction Note
 
 The source export retains the original project's redacted static transport constants. The hardware results above used locally configured keys, not zero placeholders. Set the private `GOODIX_AES_KEY` and `GOODIX_MAC_KEY` for Python SDCP use. The public client's startup checks reject absent/zero keys; metadata probing remains available without them. The portable vendor-key emulator paths were checked offline and reproduced both working transport keys. No derived key values or vendor binaries were published. See the [key-setup instructions](NATIVE_ENROLLMENT.md#public-transport-key-setup-required-for-sdcp).
+
+
+---
+
+## 9. Native C Integration and KDE Validation — November 9
+
+The verified SDCP flow was ported into `driver/goodixsdcp.c` and its crypto helper. A separate build first passed offline checks, hardware open/list and a no-finger cancellation that preserved both stored records. The reviewed library was then installed using OS administrator authentication with private old-library/reference backups. Existing right-thumb and right-little-finger host references remained readable.
+
+### First KDE attempts: legacy precheck failure
+
+fprintd identified a genuinely new finger before enrollment. The old identify no-match path reported no match, then entered a finger-lift wait; that read timed out and caused a second report attempt. KDE returned `enroll-unknown-error`. These failures occurred before native enrollment capture or commit.
+
+The driver was corrected to finish a no-match identify/verify action immediately after reporting. A dedicated actual-libfprint-API regression requires a single acquisition poll and no commit. The corrected build passed all 13 native simulations and was reinstalled.
+
+### Successful KDE enrollment
+
+The user reopened the KDE fingerprint dialog and selected the free `right-index-finger` slot. The standard service log reported progress1 through13, native enrollment SSM completion, and:
+
+```text
+Device reported enroll completion
+Print for finger FP_FINGER_RIGHT_INDEX enrolled
+enroll_cb: result enroll-completed
+```
+
+Native completion requires one added record, unchanged original record bytes and the expected enrollment identifier in readback. fprintd then listed all three slots:
+
+```text
+right-index-finger
+right-little-finger
+right-thumb
+```
+
+After the KDE dialog was closed, two separate standard service checks returned:
+
+```text
+fprintd-verify -f right-index-finger → verify-match (done)
+fprintd-verify -f right-thumb        → verify-match (done)
+```
+
+The first used the just-enrolled finger; the second used the original right thumb. The slot names describe Linux metadata. No sensor identifiers or physical-person attribution are published. This validates native new enrollment and continued existing-finger use, without Python capture, a separate bind step, Windows or a TPM call.
+
+### Validation boundary
+
+The installed local library matched the reviewed candidate checksum. Public source differs only in transport-key redaction; test-runner paths and installer candidate selection are adapted for the repository layout. The public suite has51 Python tests, plus13 actual-driver simulations. libfprint's SSM/device suites also passed.
+
+No reboot/cold-start, live GUI deletion, fresh suspend test or empty-store provisioning was completed as part of this native validation. Deletion has targeted simulation coverage. Full certificate-chain/firmware attestation and match-token verification remain open.
+
+Implementation details and local installation/rollback procedure: [Native Driver Integration](NATIVE_DRIVER_INTEGRATION.md).

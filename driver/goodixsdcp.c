@@ -73,6 +73,28 @@ struct _FpiDeviceGoodixSdcp
    * suspended"). Also used for user-initiated cancel. */
   GCancellable   *cancel;
   gboolean        suspended;
+  /* Set on resume: the next verify/enroll re-runs the SDCP handshake before
+   * arming, because a deep suspend can drop the sensor's transport session. */
+  gboolean        need_reinit;
+  GsdcpSession    session;
+  guint8          enroll_hello[162];
+  guint8          enroll_nonce[32];
+  guint8          reconnect_nonce[32];
+  guint8          enroll_record[GSDCP_RECORD_SIZE];
+  GBytes         *enroll_before;
+  GError         *enroll_error;
+  guint           enroll_samples;
+  guint           enroll_attempts;
+  guint           enroll_polls;
+  guint           enroll_connections;
+  guint           enroll_timer;
+  gboolean        enroll_timed_out;
+  gboolean        enroll_commit_attempted;
+  gboolean        enroll_ready;
+  GBytes         *delete_before;
+  guint8          delete_record[GSDCP_RECORD_SIZE];
+  guint           delete_step;
+  GError         *delete_error;
 };
 
 G_DEFINE_TYPE (FpiDeviceGoodixSdcp, fpi_device_goodixsdcp, FP_TYPE_DEVICE)
@@ -82,11 +104,33 @@ typedef void (*GoodixCmdCb) (FpiDeviceGoodixSdcp *self,
 
 typedef struct {
   guint8      cmd0;
+  guint8      cmd1;
   GoodixCmdCb callback;
+  guint8      rx[4096];
+  gsize       rx_len;
 } CmdData;
 
 static void
 cmd_data_free (CmdData *d) { g_free (d); }
+
+static gboolean
+record_valid (const guint8 *record)
+{
+  return memcmp (record, "\x62\x00\x43\x04", 4) == 0 &&
+         record[70] == 28 && record[99] == 0;
+}
+
+static gboolean
+record_list_valid (const guint8 *data, gsize len)
+{
+  if (len < 2 || data[0] != 0 || data[1] > 20 ||
+      len != 2 + (gsize) data[1] * GSDCP_RECORD_SIZE)
+    return FALSE;
+  for (guint i = 0; i < data[1]; i++)
+    if (!record_valid (data + 2 + i * GSDCP_RECORD_SIZE))
+      return FALSE;
+  return TRUE;
+}
 
 /* ----------------------------------------------------------- FpPrint <-> rec */
 
@@ -100,7 +144,7 @@ record_to_data (const guint8 *rec)
 
   /* record: [6 hdr][16 tid][16 0][32 mac][1 sidlen][28 sid][0] */
   sidlen = rec[70];
-  if (sidlen == 0 || sidlen > GSDCP_SID_MAXLEN)
+  if (sidlen == 0 || sidlen > GSDCP_RECORD_SIZE - 72)
     sidlen = 28;
   sid = rec + 71;
 
@@ -128,7 +172,7 @@ print_from_record (FpiDeviceGoodixSdcp *self, const guint8 *rec)
   gsize sidlen;
 
   sidlen = rec[70];
-  if (sidlen == 0 || sidlen > GSDCP_SID_MAXLEN)
+  if (sidlen == 0 || sidlen > GSDCP_RECORD_SIZE - 72)
     sidlen = 28;
 
   sidb64 = g_base64_encode (rec + 71, sidlen);
@@ -170,51 +214,62 @@ cmd_receive_cb (FpiUsbTransfer *transfer, FpDevice *device,
 {
   FpiDeviceGoodixSdcp *self = FPI_DEVICE_GOODIXSDCP (device);
   CmdData *data = user_data;
-  guint8 cmd0, cmd1, seq;
-  const guint8 *payload;
-  gsize payload_len;
-
+  if (self->suspended)
+    {
+      g_clear_error (&error);
+      fpi_device_suspend_complete (device, NULL);
+      fpi_ssm_mark_completed (transfer->ssm);
+      return;
+    }
   if (error)
     {
-      /* A read cancelled because the system is suspending: park the command
-       * SSM (don't fail the verify). It is re-issued from GSDCP_CMD_RESUME. */
-      if (self->suspended &&
-          g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
-        {
-          g_error_free (error);
-          fpi_ssm_jump_to_state (transfer->ssm, GSDCP_CMD_SUSPENDED);
-          return;
-        }
       fpi_ssm_mark_failed (transfer->ssm, error);
       return;
     }
-
-  /* zero-length or ACK-only: re-arm the same read */
-  if (transfer->actual_length == 0)
+  if ((gsize) transfer->actual_length > sizeof (data->rx) - data->rx_len)
+    goto malformed;
+  memcpy (data->rx + data->rx_len, transfer->buffer, transfer->actual_length);
+  data->rx_len += transfer->actual_length;
+  while (data->rx_len >= 8)
     {
-      fpi_ssm_jump_to_state (transfer->ssm, GSDCP_CMD_RECV);
+      gsize field = (gsize) data->rx[4] | ((gsize) data->rx[5] << 8);
+      gsize frame_len = 8 + field;
+      if (field < 4 || frame_len > sizeof (data->rx))
+        goto malformed;
+      if (data->rx_len < frame_len)
+        break;
+      guint8 cmd0, cmd1;
+      const guint8 *payload;
+      gsize len;
+      if (!gsdcp_parse_packet (data->rx, frame_len, &cmd0, &cmd1, NULL, &payload, &len))
+        goto malformed;
+      if (cmd0 == CMD_ACK)
+        {
+          if (len < 2 || payload[0] != 0 || payload[1] != data->cmd0)
+            goto malformed;
+          gsize consumed = (frame_len + 63) & ~((gsize) 63);
+          consumed = MIN (consumed, data->rx_len);
+          memmove (data->rx, data->rx + consumed, data->rx_len - consumed);
+          data->rx_len -= consumed;
+          continue;
+        }
+      if (cmd0 != data->cmd0 || cmd1 != data->cmd1)
+        goto malformed;
+      GoodixCmdCb callback = data->callback;
+      g_autofree guint8 *response = g_memdup2 (payload, len);
+      /* Complete the old command before the task callback starts a new one.
+       * Copy payload first because completing the SSM releases CmdData. */
+      fpi_ssm_mark_completed (transfer->ssm);
+      if (callback)
+        callback (self, response, len, NULL);
       return;
     }
-
-  if (!gsdcp_parse_packet (transfer->buffer, transfer->actual_length,
-                           &cmd0, &cmd1, &seq, &payload, &payload_len))
-    {
-      fpi_ssm_mark_failed (transfer->ssm,
-                           fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
-                                                     "malformed packet"));
-      return;
-    }
-
-  if (cmd0 == CMD_ACK)
-    {
-      /* device ACK: keep reading for the real response */
-      fpi_ssm_jump_to_state (transfer->ssm, GSDCP_CMD_RECV);
-      return;
-    }
-
-  if (data->callback)
-    data->callback (self, payload, payload_len, NULL);
-  fpi_ssm_mark_completed (transfer->ssm);
+  fpi_ssm_jump_to_state (transfer->ssm, GSDCP_CMD_RECV);
+  return;
+malformed:
+  fpi_ssm_mark_failed (transfer->ssm,
+                       fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
+                                                 "Invalid or unexpected Goodix response"));
 }
 
 static void
@@ -243,20 +298,6 @@ cmd_run_state (FpiSsm *ssm, FpDevice *dev)
                                self->cmd_cancelable ? FINGER_TIMEOUT : RECV_TIMEOUT,
                                self->cmd_cancelable ? self->cancel : NULL,
                                cmd_receive_cb, fpi_ssm_get_data (ssm));
-      break;
-
-    case GSDCP_CMD_SUSPENDED:
-      /* Parked while the system is suspended. Tell libfprint the suspend is
-       * configured (NULL error => the verify keeps running after resume, so
-       * libfprint does NOT cancel it). The SSM waits here until dev_resume
-       * jumps it to GSDCP_CMD_RESUME. */
-      fpi_device_suspend_complete (dev, NULL);
-      break;
-
-    case GSDCP_CMD_RESUME:
-      /* Woke up: acknowledge the resume and re-issue the finger read. */
-      fpi_device_resume_complete (dev, NULL);
-      fpi_ssm_jump_to_state (ssm, GSDCP_CMD_RECV);
       break;
     }
 }
@@ -288,9 +329,21 @@ goodix_cmd (FpiDeviceGoodixSdcp *self, guint8 cmd0, guint8 cmd1,
   guint8 buf[2048];
   gsize pkt_len;
 
+#ifdef GSDCP_TEST_TRANSPORT
+  /* Compile-time test seam; absent from the installed library. */
+  extern void gsdcp_test_command (FpiDeviceGoodixSdcp *, guint8, guint8,
+                                  const guint8 *, gsize, gboolean, GoodixCmdCb);
+  gsdcp_test_command (self, cmd0, cmd1, payload, payload_len, cancelable, callback);
+  return;
+#endif
+
   pkt_len = gsdcp_build_package (cmd0, cmd1, self->seq++, payload, payload_len,
                                  buf, sizeof (buf));
-  g_assert (pkt_len != 0);
+  if (pkt_len == 0)
+    {
+      callback (self, NULL, 0, fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO, "Command exceeds packet capacity"));
+      return;
+    }
 
   transfer = fpi_usb_transfer_new (FP_DEVICE (self));
   fpi_usb_transfer_fill_bulk (transfer, EP_OUT, pkt_len);
@@ -298,6 +351,7 @@ goodix_cmd (FpiDeviceGoodixSdcp *self, guint8 cmd0, guint8 cmd1,
 
   data = g_new0 (CmdData, 1);
   data->cmd0 = cmd0;
+  data->cmd1 = cmd1;
   data->callback = callback;
 
   self->cmd_transfer = g_steal_pointer (&transfer);
@@ -317,7 +371,11 @@ goodix_cmd_e3 (FpiDeviceGoodixSdcp *self, guint8 cmd1,
   gsize inner_len;
 
   inner_len = gsdcp_encrypt (plaintext, pt_len, inner, sizeof (inner));
-  g_assert (inner_len != 0);
+  if (inner_len == 0)
+    {
+      callback (self, NULL, 0, fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO, "Transport encryption failed"));
+      return;
+    }
   payload[0] = (guint8) (inner_len & 0xFF);
   payload[1] = (guint8) ((inner_len >> 8) & 0xFF);
   payload[2] = (guint8) ((inner_len >> 16) & 0xFF);
@@ -333,39 +391,39 @@ init_step_cb (FpiDeviceGoodixSdcp *self, const guint8 *data, gsize len, GError *
 {
   if (error)
     {
+      fp_dbg ("goodixsdcp: handshake step FAILED: %s", error->message);
       fpi_ssm_mark_failed (self->task_ssm, error);
       return;
     }
+  fp_dbg ("goodixsdcp: handshake step ok (%zu bytes)", len);
   fpi_ssm_next_state (self->task_ssm);
+}
+
+static void
+cache_record_list (FpiDeviceGoodixSdcp *self, const guint8 *data)
+{
+  g_clear_pointer (&self->list_result, g_ptr_array_unref);
+  self->list_result = g_ptr_array_new_with_free_func (g_object_unref);
+  for (guint i = 0; i < data[1]; i++)
+    g_ptr_array_add (self->list_result,
+                     g_object_ref_sink (print_from_record (self, data + 2 + i * GSDCP_RECORD_SIZE)));
 }
 
 static void
 init_list_cb (FpiDeviceGoodixSdcp *self, const guint8 *data, gsize len, GError *error)
 {
-  guint count, i;
-
   if (error)
     {
       fpi_ssm_mark_failed (self->task_ssm, error);
       return;
     }
-  if (self->list_result)
-    g_ptr_array_free (self->list_result, TRUE);
-  self->list_result = g_ptr_array_new_with_free_func (g_object_unref);
-
-  /* payload: [2B count][count * 100B record] */
-  if (len >= 2)
+  if (!record_list_valid (data, len))
     {
-      count = ((guint) data[0] << 8) | data[1];
-      for (i = 0; i < count; i++)
-        {
-          const guint8 *rec = data + 2 + (gsize) i * GSDCP_RECORD_SIZE;
-          if (2 + (gsize) (i + 1) * GSDCP_RECORD_SIZE > len)
-            break;
-          g_ptr_array_add (self->list_result,
-                           g_object_ref_sink (print_from_record (self, rec)));
-        }
+      fpi_ssm_mark_failed (self->task_ssm,
+                           fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO, "Unsupported sensor template list"));
+      return;
     }
+  cache_record_list (self, data);
   fpi_ssm_next_state (self->task_ssm);
 }
 
@@ -375,6 +433,8 @@ init_run_state (FpiSsm *ssm, FpDevice *dev)
   FpiDeviceGoodixSdcp *self = FPI_DEVICE_GOODIXSDCP (dev);
   guint8 zero = 0x00;
   guint8 b0arg[1] = { 0x00 };
+
+  fp_dbg ("goodixsdcp: init/open handshake state %d", fpi_ssm_get_cur_state (ssm));
 
   switch (fpi_ssm_get_cur_state (ssm))
     {
@@ -415,9 +475,12 @@ dev_open (FpDevice *device)
   GError *error = NULL;
   GUsbDevice *usb = fpi_device_get_usb_device (device);
 
-  if (!g_usb_device_reset (usb, &error) ||
-      !g_usb_device_claim_interface (usb, USB_INTERFACE, 0, &error))
+  fp_dbg ("goodixsdcp: dev_open (claim iface %d)", USB_INTERFACE);
+
+  if (!g_usb_device_claim_interface (usb, USB_INTERFACE, 0, &error))
     {
+      fp_dbg ("goodixsdcp: dev_open claim FAILED: %s",
+              error ? error->message : "?");
       fpi_device_open_complete (device, error);
       return;
     }
@@ -427,13 +490,28 @@ dev_open (FpDevice *device)
 }
 
 static void
+close_cleanup_cb (FpiDeviceGoodixSdcp *self, const guint8 *data, gsize len, GError *error)
+{
+  FpDevice *device = FP_DEVICE (self);
+  GError *release_error = NULL;
+  GUsbDevice *usb = fpi_device_get_usb_device (device);
+  if (!error && (!len || data[0] != 0))
+    error = fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO, "Cannot disable fingerprint power-button shield");
+  g_usb_device_release_interface (usb, USB_INTERFACE, 0, &release_error);
+  if (!error)
+    error = release_error;
+  else
+    g_clear_error (&release_error);
+  g_clear_object (&self->cancel);
+  fpi_device_close_complete (device, error);
+}
+
+static void
 dev_close (FpDevice *device)
 {
-  GError *error = NULL;
-  GUsbDevice *usb = fpi_device_get_usb_device (device);
-
-  g_usb_device_release_interface (usb, USB_INTERFACE, 0, &error);
-  fpi_device_close_complete (device, error);
+  FpiDeviceGoodixSdcp *self = FPI_DEVICE_GOODIXSDCP (device);
+  guint8 zero = 0;
+  goodix_cmd (self, CMD_PSK, 0, &zero, 1, FALSE, close_cleanup_cb);
 }
 
 /* ------------------------------------------------------- verify / identify */
@@ -506,7 +584,7 @@ verify_match_cb (FpiDeviceGoodixSdcp *self, const guint8 *data, gsize len, GErro
 
   fp_dbg ("a5 verify response: %zu bytes, first=%02x", len, len ? data[0] : 0);
 
-  if (len >= GSDCP_RECORD_SIZE + 8)
+  if (len >= GSDCP_RECORD_SIZE + 8 && data[0] == 0 && record_valid (data + 8))
     {
       /* match token: matched record embedded at offset 8.
        * report_match() hands new_scan to fpi_device_*_report (transfer full),
@@ -517,10 +595,11 @@ verify_match_cb (FpiDeviceGoodixSdcp *self, const guint8 *data, gsize len, GErro
     }
   else if (len >= 1 && data[0] == 0x01)
     {
-      /* clean read but no match: report FAIL, then wait for finger lift so the
-       * next verify starts fresh (avoids hammering the sensor on wrong finger) */
+      /* A no-match is a completed identify result. In particular, fprintd's
+       * enrollment precheck must finish here before starting native capture.
+       * A second sensor read could time out and report the same result twice. */
       report_match (self, NULL);
-      fpi_ssm_next_state (self->task_ssm);   /* -> GSDCP_VER_WAIT_LIFT */
+      fpi_ssm_mark_completed (self->task_ssm);
     }
   else
     {
@@ -530,28 +609,6 @@ verify_match_cb (FpiDeviceGoodixSdcp *self, const guint8 *data, gsize len, GErro
     }
 }
 
-static void
-verify_lift_cb (FpiDeviceGoodixSdcp *self, const guint8 *data, gsize len, GError *error)
-{
-  if (error)
-    {
-      fpi_ssm_mark_failed (self->task_ssm, error);
-      return;
-    }
-  if (len >= 1 && data[0] == 0xc0)
-    {
-      /* finger removed -> verify done */
-      fpi_device_report_finger_status_changes (FP_DEVICE (self),
-                                               FP_FINGER_STATUS_NONE,
-                                               FP_FINGER_STATUS_PRESENT);
-      fpi_ssm_mark_completed (self->task_ssm);
-    }
-  else
-    {
-      /* still on the reader: poll again gently */
-      fpi_ssm_jump_to_state_delayed (self->task_ssm, GSDCP_VER_WAIT_LIFT, 200);
-    }
-}
 
 static void
 verify_arm_cb (FpiDeviceGoodixSdcp *self, const guint8 *data, gsize len, GError *error)
@@ -573,15 +630,60 @@ verify_arm_cb (FpiDeviceGoodixSdcp *self, const guint8 *data, gsize len, GError 
   fpi_ssm_next_state (self->task_ssm);
 }
 
+/* Optional session-refresh prefix shared by verify and enroll. Runs the SDCP
+ * handshake (POV/HELLO/CAL/PSK) again before arming, but only when
+ * self->need_reinit is set (after a resume). Returns TRUE if the current state
+ * was a reinit state and has been handled here. Reuses init_step_cb, which
+ * advances self->task_ssm (== the running verify/enroll SSM) on success. */
+static gboolean
+gsdcp_reinit_state (FpiDeviceGoodixSdcp *self, FpiSsm *ssm)
+{
+  guint8 zero = 0x00;
+  guint8 b0arg[1] = { 0x00 };
+
+  switch (fpi_ssm_get_cur_state (ssm))
+    {
+    case GSDCP_VER_REINIT_POV:
+      if (!self->need_reinit)
+        {
+          /* normal start: no session refresh needed */
+          fpi_ssm_jump_to_state (ssm, GSDCP_VER_ARM);
+          return TRUE;
+        }
+      fp_dbg ("goodixsdcp: resume session-refresh: re-running SDCP handshake");
+      goodix_cmd (self, CMD_POV, 0x04, &zero, 1, FALSE, init_step_cb);
+      return TRUE;
+    case GSDCP_VER_REINIT_HELLO2:
+      goodix_cmd_e3 (self, 0x02, GSDCP_HELLO, sizeof (GSDCP_HELLO), init_step_cb);
+      return TRUE;
+    case GSDCP_VER_REINIT_HELLO0:
+      goodix_cmd_e3 (self, 0x00, GSDCP_HELLO, sizeof (GSDCP_HELLO), init_step_cb);
+      return TRUE;
+    case GSDCP_VER_REINIT_CAL:
+      goodix_cmd (self, CMD_CAL, 0x02, b0arg, 1, FALSE, init_step_cb);
+      return TRUE;
+    case GSDCP_VER_REINIT_PSK:
+      self->need_reinit = FALSE;   /* refresh complete; -> GSDCP_VER_ARM next */
+      goodix_cmd (self, CMD_PSK, 0x01, &zero, 1, FALSE, init_step_cb);
+      return TRUE;
+    default:
+      return FALSE;
+    }
+}
+
 static void
 verify_run_state (FpiSsm *ssm, FpDevice *dev)
 {
   FpiDeviceGoodixSdcp *self = FPI_DEVICE_GOODIXSDCP (dev);
   guint8 nonce[32];
 
+  if (gsdcp_reinit_state (self, ssm))
+    return;
+
   switch (fpi_ssm_get_cur_state (ssm))
     {
     case GSDCP_VER_ARM:
+      fp_dbg ("goodixsdcp: verify: arming (a2), waiting for finger");
       fpi_device_report_finger_status_changes (dev,
                                                FP_FINGER_STATUS_NEEDED,
                                                FP_FINGER_STATUS_NONE);
@@ -592,9 +694,6 @@ verify_run_state (FpiSsm *ssm, FpDevice *dev)
       for (int i = 0; i < 32; i++)
         nonce[i] = (guint8) g_random_int_range (0, 256);
       goodix_cmd (self, CMD_MATCH, 0x00, nonce, sizeof (nonce), TRUE, verify_match_cb);
-      break;
-    case GSDCP_VER_WAIT_LIFT:
-      goodix_cmd (self, CMD_ARM, 0x00, ARM_DETECT, sizeof (ARM_DETECT), FALSE, verify_lift_cb);
       break;
     }
 }
@@ -624,6 +723,7 @@ dev_verify_identify (FpDevice *device)
   FpiDeviceGoodixSdcp *self = FPI_DEVICE_GOODIXSDCP (device);
 
   self->suspended = FALSE;
+  self->need_reinit = FALSE;
   g_clear_object (&self->cancel);
   self->cancel = g_cancellable_new ();
 
@@ -631,85 +731,323 @@ dev_verify_identify (FpDevice *device)
   fpi_ssm_start (self->task_ssm, verify_ssm_done);
 }
 
-/* --------------------------------------------------------- enroll (bind) */
+/* --------------------------------------------------------- native enroll */
 
-/* Enroll = "bind": user presents an already-(Windows-)enrolled finger, the chip
- * matches it, and we register the matched on-chip template as an FpPrint. */
 static void
-enroll_match_cb (FpiDeviceGoodixSdcp *self, const guint8 *data, gsize len, GError *error)
+enroll_abort (FpiDeviceGoodixSdcp *self, GError *error)
 {
-  FpDevice *dev = FP_DEVICE (self);
-
-  if (error)
-    {
-      fpi_ssm_mark_failed (self->task_ssm, error);
-      return;
-    }
-  fpi_device_report_finger_status_changes (dev, FP_FINGER_STATUS_PRESENT,
-                                           FP_FINGER_STATUS_NONE);
-
-  fp_dbg ("a5 enroll response: %zu bytes, first=%02x", len, len ? data[0] : 0);
-
-  if (len >= GSDCP_RECORD_SIZE + 8)
-    {
-      /* matched an on-chip template -> bind it to the requested print */
-      FpPrint *print = NULL;
-      fpi_device_get_enroll_data (dev, &print);
-      apply_record_to_print (print, data + 8);
-      fpi_device_enroll_progress (dev, 1, NULL, NULL);
-      fpi_ssm_mark_completed (self->task_ssm);
-    }
-  else if (len >= 1 && data[0] == 0x01)
-    {
-      /* clean read but no match: not (yet) enrolled in Windows Hello */
-      fpi_ssm_mark_failed (self->task_ssm,
-                           fpi_device_retry_new_msg (FP_DEVICE_RETRY_GENERAL,
-                             "Finger not recognised. Only fingers already "
-                             "enrolled in Windows Hello can be added here "
-                             "(enrollment of new fingers is TPM-bound). "
-                             "Place a Windows-Hello-enrolled finger."));
-    }
+  gint state = fpi_ssm_get_cur_state (self->task_ssm);
+  if (!self->enroll_error)
+    self->enroll_error = error;
   else
+    g_clear_error (&error);
+  if (state == GSDCP_EN_OFF)
+    fpi_ssm_mark_completed (self->task_ssm);
+  else
+    fpi_ssm_jump_to_state (self->task_ssm,
+                           self->enroll_commit_attempted && state < GSDCP_EN_POST_LIST ?
+                           GSDCP_EN_POST_LIST : GSDCP_EN_OFF);
+}
+
+static gboolean
+records_preserved (const guint8 *before, gsize before_len,
+                   const guint8 *after, gsize after_len,
+                   const guint8 *removed)
+{
+  for (gsize i = 2; i + GSDCP_RECORD_SIZE <= before_len; i += GSDCP_RECORD_SIZE)
     {
-      /* no clean capture (0x03 wrong-state / 0xff no-finger / short) */
-      fpi_ssm_mark_failed (self->task_ssm,
-                           fpi_device_retry_new (FP_DEVICE_RETRY_CENTER_FINGER));
+      if (removed && memcmp (before + i, removed, GSDCP_RECORD_SIZE) == 0)
+        continue;
+      gboolean found = FALSE;
+      for (gsize j = 2; j + GSDCP_RECORD_SIZE <= after_len; j += GSDCP_RECORD_SIZE)
+        if (memcmp (before + i, after + j, GSDCP_RECORD_SIZE) == 0)
+          found = TRUE;
+      if (!found)
+        return FALSE;
     }
+  return TRUE;
 }
 
 static void
-enroll_arm_cb (FpiDeviceGoodixSdcp *self, const guint8 *data, gsize len, GError *error)
+enroll_step_cb (FpiDeviceGoodixSdcp *self, const guint8 *data, gsize len, GError *error)
 {
+  FpDevice *dev = FP_DEVICE (self);
+  gint state = fpi_ssm_get_cur_state (self->task_ssm);
   if (error)
     {
-      fpi_ssm_mark_failed (self->task_ssm, error);
+      enroll_abort (self, error);
       return;
     }
-  if (len >= 1 && data[0] == 0xc0)
+  if (state == GSDCP_EN_VERSION)
     {
-      fpi_ssm_jump_to_state (self->task_ssm, GSDCP_VER_ARM);
+      if (len != 129 || data[0] != 0 || memcmp (data + 11, "01010032", 8) != 0 ||
+          memcmp (data + 35, "GF3268", 6) != 0)
+        {
+          enroll_abort (self, fpi_device_error_new_msg (FP_DEVICE_ERROR_NOT_SUPPORTED,
+                         "Native enrollment requires GF3268 firmware 01010032"));
+          return;
+        }
+    }
+  else if (state == GSDCP_EN_LIST)
+    {
+      if (!record_list_valid (data, len))
+        {
+          enroll_abort (self, fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO, "Invalid enrollment template list"));
+          return;
+        }
+      if (data[1] == 0 || data[1] == 20)
+        {
+          enroll_abort (self, fpi_device_error_new_msg (
+                         data[1] == 0 ? FP_DEVICE_ERROR_NOT_SUPPORTED : FP_DEVICE_ERROR_DATA_FULL,
+                         data[1] == 0 ? "Initial sensor provisioning is required before native enrollment" :
+                                        "Fingerprint storage is full"));
+          return;
+        }
+      self->enroll_before = g_bytes_new (data, len);
+      memcpy (self->enroll_record, data + 2, GSDCP_RECORD_SIZE);
+    }
+  else if (state == GSDCP_EN_POST_LIST)
+    {
+      gsize before_len = 0;
+      const guint8 *before = self->enroll_before ? g_bytes_get_data (self->enroll_before, &before_len) : NULL;
+      if (!record_list_valid (data, len) || !before || len != before_len + GSDCP_RECORD_SIZE ||
+          !records_preserved (before, before_len, data, len, NULL))
+        {
+          enroll_abort (self, fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
+                         "Enrollment readback did not confirm one additional template and unchanged originals"));
+          return;
+        }
+      const guint8 *created = NULL;
+      guint found = 0;
+      for (guint i = 0; i < data[1]; i++)
+        {
+          const guint8 *record = data + 2 + i * GSDCP_RECORD_SIZE;
+          if (memcmp (record + 38, self->enroll_record + 38, 32) == 0)
+            {
+              created = record;
+              found++;
+            }
+        }
+      if (found != 1)
+        {
+          enroll_abort (self, fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
+                         "Stored template does not have the expected enrollment identifier"));
+          return;
+        }
+      /* Use the sensor-assigned account ID, not the prepared random bytes. */
+      FpPrint *print = NULL;
+      fpi_device_get_enroll_data (dev, &print);
+      apply_record_to_print (print, created);
+      cache_record_list (self, data);
+      self->enroll_ready = TRUE;
+      /* Readback can confirm a commit even if its response was lost. */
+      g_clear_error (&self->enroll_error);
+    }
+  else if (state == GSDCP_EN_HELLO0)
+    {
+      if (!gsdcp_session_accept (&self->session, data, len))
+        {
+          enroll_abort (self, fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO, "SDCP server authentication failed"));
+          return;
+        }
+      if (++self->enroll_connections < 2)
+        {
+          fpi_ssm_jump_to_state (self->task_ssm, GSDCP_EN_POV);
+          return;
+        }
+    }
+  else if (state == GSDCP_EN_RECONNECT1)
+    {
+      if (!gsdcp_session_check_reconnect (&self->session, self->reconnect_nonce, data, len))
+        {
+          enroll_abort (self, fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO, "SDCP reconnect authentication failed"));
+          return;
+        }
+    }
+  else if (state == GSDCP_EN_ARM)
+    {
+      if (len && (data[0] == 0xc0 || data[0] == 0x71 || data[0] == 0x72 || data[0] == 0x73))
+        {
+          fpi_ssm_jump_to_state_delayed (self->task_ssm, GSDCP_EN_RECONNECT2, 200);
+          return;
+        }
+      if (len < 3 || data[0] != 0)
+        {
+          enroll_abort (self, fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO, "Invalid fingerprint capture response"));
+          return;
+        }
+      fpi_device_report_finger_status_changes (dev, FP_FINGER_STATUS_PRESENT, FP_FINGER_STATUS_NEEDED);
+      if (data[1] < 15 || data[2] < 65)
+        {
+          fpi_device_enroll_progress (dev, self->enroll_samples, NULL,
+                                      fpi_device_retry_new (FP_DEVICE_RETRY_CENTER_FINGER));
+          fpi_ssm_jump_to_state_delayed (self->task_ssm, GSDCP_EN_RECONNECT2, 1200);
+          return;
+        }
+    }
+  else if (state == GSDCP_EN_UPDATE)
+    {
+      if (len == 3 && (data[0] == 0x72 || data[0] == 0x73))
+        {
+          fpi_device_enroll_progress (dev, self->enroll_samples, NULL,
+                                      fpi_device_retry_new (FP_DEVICE_RETRY_REMOVE_FINGER));
+          fpi_ssm_jump_to_state_delayed (self->task_ssm, GSDCP_EN_RECONNECT2, 1200);
+          return;
+        }
+      if (len != 3 || data[0] != 0)
+        {
+          enroll_abort (self, fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
+                         "Sensor rejected enrollment update (0x%02x)", len ? data[0] : 0xff));
+          return;
+        }
+      self->enroll_samples++;
+      fpi_device_report_finger_status_changes (dev, FP_FINGER_STATUS_NONE, FP_FINGER_STATUS_PRESENT);
+      fpi_device_enroll_progress (dev, self->enroll_samples, NULL, NULL);
+      fpi_ssm_jump_to_state_delayed (self->task_ssm,
+                                     self->enroll_samples == 13 ? GSDCP_EN_DUPLICATE : GSDCP_EN_RECONNECT2,
+                                     self->enroll_samples == 13 ? 0 : 1200);
       return;
     }
-  fpi_ssm_next_state (self->task_ssm);
+  else if (state == GSDCP_EN_DUPLICATE)
+    {
+      if (len != 1 || data[0] != 0)
+        {
+          enroll_abort (self, fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_DUPLICATE,
+                         "This finger is already stored on the sensor"));
+          return;
+        }
+    }
+  else if (state == GSDCP_EN_BEGIN)
+    {
+      if (len != 33 || data[0] != 0)
+        {
+          enroll_abort (self, fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO, "Invalid enrollment nonce"));
+          return;
+        }
+      memcpy (self->enroll_nonce, data + 1, 32);
+    }
+  else
+    {
+      if (!len || data[0] != 0 ||
+          ((state == GSDCP_EN_HELLO2 || state == GSDCP_EN_RECONNECT2) && len != 5))
+        {
+          enroll_abort (self, fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
+                         "Enrollment command failed in state %d (0x%02x)", state, len ? data[0] : 0xff));
+          return;
+        }
+    }
+  if (state == GSDCP_EN_OFF)
+    fpi_ssm_mark_completed (self->task_ssm);
+  else
+    fpi_ssm_next_state (self->task_ssm);
 }
 
 static void
 enroll_run_state (FpiSsm *ssm, FpDevice *dev)
 {
   FpiDeviceGoodixSdcp *self = FPI_DEVICE_GOODIXSDCP (dev);
-  guint8 nonce[32];
-
-  switch (fpi_ssm_get_cur_state (ssm))
+  guint8 zero = 0;
+  gint state = fpi_ssm_get_cur_state (ssm);
+  if (state < GSDCP_EN_POST_LIST && g_cancellable_is_cancelled (self->cancel))
     {
-    case GSDCP_VER_ARM:
-      goodix_cmd (self, CMD_ARM, 0x00, ARM_DETECT, sizeof (ARM_DETECT), TRUE, enroll_arm_cb);
+      enroll_abort (self, self->enroll_timed_out ?
+                     fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL, "Fingerprint enrollment timed out") :
+                     g_error_new_literal (G_IO_ERROR, G_IO_ERROR_CANCELLED, "Fingerprint enrollment cancelled"));
+      return;
+    }
+  switch (state)
+    {
+    case GSDCP_EN_VERSION:
+      goodix_cmd (self, 0xd0, 0, &zero, 1, FALSE, enroll_step_cb);
       break;
-    case GSDCP_VER_MATCH:
-      for (int i = 0; i < 32; i++)
-        nonce[i] = (guint8) g_random_int_range (0, 256);
-      goodix_cmd (self, CMD_MATCH, 0x00, nonce, sizeof (nonce), TRUE, enroll_match_cb);
+    case GSDCP_EN_LIST:
+    case GSDCP_EN_POST_LIST:
+      goodix_cmd (self, CMD_LIST, 0, &zero, 1, FALSE, enroll_step_cb);
+      break;
+    case GSDCP_EN_POV:
+      if (!gsdcp_session_start (&self->session, self->enroll_hello))
+        {
+          enroll_abort (self, fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL, "Cannot create a fresh SDCP connection"));
+          break;
+        }
+      goodix_cmd (self, CMD_POV, 4, &zero, 1, FALSE, enroll_step_cb);
+      break;
+    case GSDCP_EN_HELLO2:
+    case GSDCP_EN_HELLO0:
+      goodix_cmd_e3 (self, state == GSDCP_EN_HELLO2 ? 2 : 0,
+                      self->enroll_hello, sizeof (self->enroll_hello), enroll_step_cb);
+      break;
+    case GSDCP_EN_CAL:
+    case GSDCP_EN_SAMPLE_CAL:
+      goodix_cmd (self, CMD_CAL, 2, &zero, 1, FALSE, enroll_step_cb);
+      break;
+    case GSDCP_EN_SHIELD:
+    case GSDCP_EN_OFF:
+      goodix_cmd (self, CMD_PSK, state == GSDCP_EN_SHIELD ? 1 : 0, &zero, 1, FALSE, enroll_step_cb);
+      break;
+    case GSDCP_EN_BEGIN:
+    case GSDCP_EN_DUPLICATE:
+      goodix_cmd (self, state == GSDCP_EN_BEGIN ? 0xa1 : 0xa3, 0, &zero, 1, FALSE, enroll_step_cb);
+      break;
+    case GSDCP_EN_RECONNECT2:
+      if (!gsdcp_random (self->reconnect_nonce, 32))
+        {
+          enroll_abort (self, fpi_device_error_new (FP_DEVICE_ERROR_GENERAL));
+          break;
+        }
+      goodix_cmd_e3 (self, 2, self->reconnect_nonce, 32, enroll_step_cb);
+      break;
+    case GSDCP_EN_RECONNECT1:
+      goodix_cmd_e3 (self, 1, self->reconnect_nonce, 32, enroll_step_cb);
+      break;
+    case GSDCP_EN_ARM:
+      {
+        const guint8 capture[] = { 0, 0x0f, 0x41, 1 };
+        if (++self->enroll_polls > 90)
+          {
+            enroll_abort (self, fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL, "Enrollment retry limit reached"));
+            break;
+          }
+        fpi_device_report_finger_status_changes (dev, FP_FINGER_STATUS_NEEDED, FP_FINGER_STATUS_PRESENT);
+        goodix_cmd (self, CMD_ARM, 0, capture, sizeof (capture), TRUE, enroll_step_cb);
+        break;
+      }
+    case GSDCP_EN_UPDATE:
+      {
+        const guint8 update[] = { 1, 100, self->enroll_samples < 5 ? 100 : 80 };
+        if (++self->enroll_attempts > 39)
+          {
+            enroll_abort (self, fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL, "Too many overlapping enrollment samples"));
+            break;
+          }
+        goodix_cmd (self, 0xa0, 0, update, sizeof (update), FALSE, enroll_step_cb);
+        break;
+      }
+    case GSDCP_EN_COMMIT:
+      if (self->enroll_samples != 13 || self->enroll_commit_attempted ||
+          !gsdcp_session_mac (&self->session, "enroll", self->enroll_nonce, 32, self->enroll_record + 38) ||
+          !gsdcp_random (self->enroll_record + 6, 16))
+        {
+          enroll_abort (self, fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO, "Invalid enrollment commit state"));
+          break;
+        }
+      self->enroll_record[5] = 0;
+      memset (self->enroll_record + 22, 0, 16);
+      /* A4 is consumed BEFORE submission: never retry an uncertain write. */
+      self->enroll_commit_attempted = TRUE;
+      goodix_cmd (self, 0xa4, 0, self->enroll_record, GSDCP_RECORD_SIZE, FALSE, enroll_step_cb);
       break;
     }
+}
+
+static gboolean
+enroll_timeout_cb (gpointer user_data)
+{
+  FpiDeviceGoodixSdcp *self = user_data;
+  self->enroll_timer = 0;
+  self->enroll_timed_out = TRUE;
+  g_cancellable_cancel (self->cancel);
+  return G_SOURCE_REMOVE;
 }
 
 static void
@@ -717,29 +1055,42 @@ enroll_ssm_done (FpiSsm *ssm, FpDevice *dev, GError *error)
 {
   FpiDeviceGoodixSdcp *self = FPI_DEVICE_GOODIXSDCP (dev);
   FpPrint *print = NULL;
-
   self->task_ssm = NULL;
-  if (error)
+  if (self->enroll_timer)
     {
-      fpi_device_enroll_complete (dev, NULL, error);
-      return;
+      g_source_remove (self->enroll_timer);
+      self->enroll_timer = 0;
     }
-  fpi_device_get_enroll_data (dev, &print);
-  fpi_device_enroll_complete (dev, g_object_ref (print), NULL);
+  if (!error)
+    error = g_steal_pointer (&self->enroll_error);
+  else
+    g_clear_error (&self->enroll_error);
+  if (!error && !self->enroll_ready)
+    error = fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO, "Enrollment did not produce a verified stored template");
+  if (!error)
+    fpi_device_get_enroll_data (dev, &print);
+  gsdcp_session_clear (&self->session);
+  OPENSSL_cleanse (self->enroll_nonce, sizeof (self->enroll_nonce));
+  g_clear_pointer (&self->enroll_before, g_bytes_unref);
+  fpi_device_enroll_complete (dev, print ? g_object_ref (print) : NULL, error);
 }
 
 static void
 dev_enroll (FpDevice *device)
 {
   FpiDeviceGoodixSdcp *self = FPI_DEVICE_GOODIXSDCP (device);
-
   self->suspended = FALSE;
   g_clear_object (&self->cancel);
   self->cancel = g_cancellable_new ();
-
-  self->task_ssm = fpi_ssm_new (device, enroll_run_state, GSDCP_VER_NUM_STATES);
+  g_clear_error (&self->enroll_error);
+  g_clear_pointer (&self->enroll_before, g_bytes_unref);
+  self->enroll_samples = self->enroll_attempts = self->enroll_polls = self->enroll_connections = 0;
+  self->enroll_ready = self->enroll_commit_attempted = self->enroll_timed_out = FALSE;
+  self->enroll_timer = g_timeout_add_seconds (180, enroll_timeout_cb, self);
+  self->task_ssm = fpi_ssm_new (device, enroll_run_state, GSDCP_EN_NUM_STATES);
   fpi_ssm_start (self->task_ssm, enroll_ssm_done);
 }
+
 
 /* -------------------------------------------------------------- list */
 
@@ -760,18 +1111,111 @@ dev_list (FpDevice *device)
 
 /* -------------------------------------------------------------- delete */
 
-/* Removing a print only drops the host-side binding; the on-chip template
- * (owned by the Windows-Hello enrollment) is left untouched on purpose. */
 static void
-dev_delete (FpDevice *device)
+delete_finish (FpiDeviceGoodixSdcp *self, GError *error)
 {
-  fpi_device_delete_complete (device, NULL);
+  g_clear_pointer (&self->delete_before, g_bytes_unref);
+  g_clear_error (&self->delete_error);
+  fpi_device_delete_complete (FP_DEVICE (self), error);
 }
 
 static void
-dev_clear_storage (FpDevice *device)
+delete_step_cb (FpiDeviceGoodixSdcp *self, const guint8 *data, gsize len, GError *error)
 {
-  fpi_device_clear_storage_complete (device, NULL);
+  FpDevice *device = FP_DEVICE (self);
+  guint8 zero = 0;
+  if (self->delete_step == 1)
+    {
+      /* Never repeat A7, even when its response was lost. Query the result. */
+      if (error)
+        self->delete_error = error;
+      else if (len != 1 || data[0] != 0)
+        self->delete_error = fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO, "Sensor rejected fingerprint deletion");
+      self->delete_step = 2;
+      goodix_cmd (self, CMD_LIST, 0, &zero, 1, FALSE, delete_step_cb);
+      return;
+    }
+  if (error || !record_list_valid (data, len))
+    {
+      delete_finish (self, error ? error :
+                      fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO, "Invalid deletion template list"));
+      return;
+    }
+  if (self->delete_step == 0)
+    {
+      FpPrint *print = NULL;
+      guint8 tid[GSDCP_TID_SIZE];
+      fpi_device_get_delete_data (device, &print);
+      /* fprintd may try to garbage-collect unclaimed device records when full
+       * or during duplicate prechecks. Those may belong to Windows. Only a
+       * concrete host reference with user/finger metadata authorizes deletion. */
+      if (print && (!fp_print_get_username (print) || !*fp_print_get_username (print) ||
+                    fp_print_get_finger (print) == FP_FINGER_UNKNOWN))
+        {
+          delete_finish (self, fpi_device_error_new_msg (FP_DEVICE_ERROR_NOT_SUPPORTED,
+                          "Automatic deletion of unclaimed sensor fingerprints is disabled"));
+          return;
+        }
+      if (!print || !print_get_tid (print, tid))
+        {
+          delete_finish (self, fpi_device_error_new (FP_DEVICE_ERROR_DATA_INVALID));
+          return;
+        }
+      guint found = 0;
+      for (guint i = 0; i < data[1]; i++)
+        if (memcmp (data + 2 + i * GSDCP_RECORD_SIZE + 6, tid, GSDCP_TID_SIZE) == 0)
+          {
+            memcpy (self->delete_record, data + 2 + i * GSDCP_RECORD_SIZE, GSDCP_RECORD_SIZE);
+            found++;
+          }
+      if (found != 1)
+        {
+          /* Already absent is a successful idempotent host deletion. */
+          cache_record_list (self, data);
+          delete_finish (self, found == 0 ? NULL : fpi_device_error_new (FP_DEVICE_ERROR_DATA_INVALID));
+          return;
+        }
+      GCancellable *cancel = fpi_device_get_cancellable (device);
+      if (cancel && g_cancellable_is_cancelled (cancel))
+        {
+          delete_finish (self, g_error_new_literal (G_IO_ERROR, G_IO_ERROR_CANCELLED, "Fingerprint deletion cancelled"));
+          return;
+        }
+      self->delete_before = g_bytes_new (data, len);
+      guint8 payload[2 + GSDCP_RECORD_SIZE] = { 1, 0 };
+      memcpy (payload + 2, self->delete_record, GSDCP_RECORD_SIZE);
+      payload[2 + 5] = 0; /* Stored-record flag is normalized on the wire. */
+      self->delete_step = 1;
+      goodix_cmd (self, 0xa7, 2, payload, sizeof (payload), FALSE, delete_step_cb);
+      return;
+    }
+  gsize before_len;
+  const guint8 *before = g_bytes_get_data (self->delete_before, &before_len);
+  gboolean preserved = len + GSDCP_RECORD_SIZE == before_len &&
+    records_preserved (before, before_len, data, len, self->delete_record);
+  for (guint i = 0; i < data[1]; i++)
+    if (memcmp (data + 2 + i * GSDCP_RECORD_SIZE + 6, self->delete_record + 6, GSDCP_TID_SIZE) == 0)
+      preserved = FALSE;
+  if (!preserved)
+    {
+      GError *failure = g_steal_pointer (&self->delete_error);
+      delete_finish (self, failure ? failure : fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
+                      "Deletion readback did not confirm the requested removal and unchanged other fingerprints"));
+      return;
+    }
+  cache_record_list (self, data);
+  delete_finish (self, NULL);
+}
+
+static void
+dev_delete (FpDevice *device)
+{
+  FpiDeviceGoodixSdcp *self = FPI_DEVICE_GOODIXSDCP (device);
+  guint8 zero = 0;
+  self->delete_step = 0;
+  g_clear_error (&self->delete_error);
+  g_clear_pointer (&self->delete_before, g_bytes_unref);
+  goodix_cmd (self, CMD_LIST, 0, &zero, 1, FALSE, delete_step_cb);
 }
 
 /* -------------------------------------------------------------- probe / class */
@@ -809,11 +1253,12 @@ dev_cancel (FpDevice *device)
 }
 
 /* System is about to suspend. If we are inside a cancellable finger read
- * (verify/identify/enroll waiting for a finger), pause it cleanly: cancel the
- * read, which lands in GSDCP_CMD_SUSPENDED and completes the suspend with a
- * NULL error so libfprint keeps the action alive across the sleep. In any
- * other situation we cannot pause, so we decline (NOT_SUPPORTED); libfprint
- * then cancels the running action, which is the pre-existing behaviour. */
+ * (verify/identify/enroll waiting for a finger), pause it cleanly by cancelling
+ * the read: cmd_receive_cb then completes the suspend with a NULL error (so
+ * libfprint keeps the action alive across the sleep) and quietly finishes the
+ * command, leaving the task SSM parked. In any other situation we cannot pause,
+ * so we decline (NOT_SUPPORTED); libfprint then cancels the running action,
+ * which is the pre-existing behaviour. */
 static void
 dev_suspend (FpDevice *device)
 {
@@ -821,40 +1266,49 @@ dev_suspend (FpDevice *device)
   FpiDeviceAction action = fpi_device_get_current_action (device);
 
   if ((action == FPI_DEVICE_ACTION_VERIFY ||
-       action == FPI_DEVICE_ACTION_IDENTIFY ||
-       action == FPI_DEVICE_ACTION_ENROLL) &&
+       action == FPI_DEVICE_ACTION_IDENTIFY) &&
       self->cmd_ssm && self->cmd_cancelable && self->cancel)
     {
+      fp_dbg ("goodixsdcp: dev_suspend during action %d: pausing finger read", action);
       self->suspended = TRUE;
       g_cancellable_cancel (self->cancel);
-      /* fpi_device_suspend_complete() is called from GSDCP_CMD_SUSPENDED once
-       * the cancelled read has unwound. */
+      /* fpi_device_suspend_complete() is called from cmd_receive_cb once the
+       * cancelled read has unwound. */
     }
   else
     {
+      fp_dbg ("goodixsdcp: dev_suspend (action %d, not in finger read): NOT_SUPPORTED",
+              action);
       fpi_device_suspend_complete (device,
                                    fpi_device_error_new (FP_DEVICE_ERROR_NOT_SUPPORTED));
     }
 }
 
-/* System resumed. Re-arm the finger read with a fresh cancellable and let the
- * paused command SSM continue. */
+/* System resumed. A deep suspend can drop the sensor's transport session, so we
+ * do NOT just re-read: we set need_reinit and jump the parked task SSM to the
+ * session-refresh prefix (GSDCP_VER_REINIT_POV), which re-runs the SDCP
+ * handshake and then re-arms. If the sensor kept its session the handshake is
+ * simply redone harmlessly; if it lost it, this restores it. */
 static void
 dev_resume (FpDevice *device)
 {
   FpiDeviceGoodixSdcp *self = FPI_DEVICE_GOODIXSDCP (device);
 
-  if (self->suspended && self->cmd_ssm &&
-      fpi_ssm_get_cur_state (self->cmd_ssm) == GSDCP_CMD_SUSPENDED)
+  if (self->suspended && self->task_ssm)
     {
+      fp_dbg ("goodixsdcp: dev_resume: re-establishing session then re-arming");
       self->suspended = FALSE;
+      self->need_reinit = TRUE;
+      self->seq = 0;                 /* fresh transport sequence after wake */
       g_clear_object (&self->cancel);
       self->cancel = g_cancellable_new ();
-      /* GSDCP_CMD_RESUME calls fpi_device_resume_complete() and re-issues. */
-      fpi_ssm_jump_to_state (self->cmd_ssm, GSDCP_CMD_RESUME);
+      fpi_device_resume_complete (device, NULL);
+      fpi_ssm_jump_to_state (self->task_ssm, GSDCP_VER_REINIT_POV);
     }
   else
     {
+      fp_dbg ("goodixsdcp: dev_resume: no paused action (task_ssm=%p), just clearing",
+              (void *) self->task_ssm);
       self->suspended = FALSE;
       fpi_device_resume_complete (device, NULL);
     }
@@ -872,6 +1326,13 @@ fpi_device_goodixsdcp_finalize (GObject *object)
 
   if (self->list_result)
     g_ptr_array_free (self->list_result, TRUE);
+  if (self->enroll_timer)
+    g_source_remove (self->enroll_timer);
+  gsdcp_session_clear (&self->session);
+  g_clear_pointer (&self->enroll_before, g_bytes_unref);
+  g_clear_pointer (&self->delete_before, g_bytes_unref);
+  g_clear_error (&self->enroll_error);
+  g_clear_error (&self->delete_error);
   g_clear_object (&self->cancel);
   G_OBJECT_CLASS (fpi_device_goodixsdcp_parent_class)->finalize (object);
 }
@@ -889,7 +1350,7 @@ fpi_device_goodixsdcp_class_init (FpiDeviceGoodixSdcpClass *klass)
   dev_class->type     = FP_DEVICE_TYPE_USB;
   dev_class->scan_type = FP_SCAN_TYPE_PRESS;
   dev_class->id_table = id_table;
-  dev_class->nr_enroll_stages = 1;   /* bind = one presentation */
+  dev_class->nr_enroll_stages = 13;  /* native capture: five + eight updates */
   dev_class->temp_hot_seconds = -1;
 
   dev_class->probe    = dev_probe;
@@ -900,7 +1361,6 @@ fpi_device_goodixsdcp_class_init (FpiDeviceGoodixSdcpClass *klass)
   dev_class->enroll   = dev_enroll;
   dev_class->list     = dev_list;
   dev_class->delete   = dev_delete;
-  dev_class->clear_storage = dev_clear_storage;
   dev_class->cancel   = dev_cancel;
   dev_class->suspend  = dev_suspend;
   dev_class->resume   = dev_resume;

@@ -1,3 +1,7 @@
 __pycache__/
 *.py[cod]
 /experiments/private/
+
+*.so
+*.so.*
+/build-install/

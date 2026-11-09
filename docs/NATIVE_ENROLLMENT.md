@@ -1,6 +1,8 @@
 # Goodix GF3268 — Native Linux Enrollment (Hardware-Validated)
 
-**Status: ✅ Additional new fingers can be enrolled under Linux on the tested GF3268 firmware.**
+**Status: ✅ Additional new fingers can be enrolled directly through KDE/fprintd with the native C driver on the tested GF3268 firmware.**
+
+The later native integration on **2026-11-09** completed a new KDE enrollment and standard `fprintd-verify` successfully. It supersedes the Python-capture / C-bind workflow below. See [Native Driver Integration](NATIVE_DRIVER_INTEGRATION.md) for the implementation, validation and rollback details.
 
 On **2026-11-09**, a right little finger that had never been registered in Windows Hello or Linux was captured, committed to the sensor, matched after fresh SDCP connections, bound to the Linux user, and successfully verified through **fprintd**. The original right thumb remained functional. An unregistered right ring finger was rejected.
 
@@ -25,7 +27,9 @@ This supersedes the previous conclusion that every new fingerprint enrollment is
 | Verify the new finger through fprintd | ✅ | `verify-match` |
 | Cold boot / reboot persistence | ⏳ | Not tested in this session |
 | First enrollment on an empty sensor | ❌ / Open | Not implemented or demonstrated |
-| Direct new capture inside the C driver | ❌ / Open | C enrollment remains a host-bind operation |
+| Direct new capture inside the C driver | ✅ | KDE completed thirteen native captures, commit and readback |
+| New native fingerprint through standard verification | ✅ | `fprintd-verify -f right-index-finger` → `verify-match` |
+| Existing fingerprint after native integration | ✅ | Original right thumb → `verify-match` |
 
 **Tested hardware:** Honor MagicBook Art 14, USB `27c6:6f94`, sensor `GF3268`, firmware **`01010032`**, MCU `GM188B0`, algorithm `1.04.05.`. Interface `0`, Bulk OUT `0x01`, Bulk IN `0x83`, 64-byte maximum packet size. The host runs CachyOS; the existing custom `goodixsdcp` installation was retained.
 
@@ -33,31 +37,39 @@ The new tools deliberately reject other firmware versions. The same USB ID alone
 
 ---
 
-## 🧭 Two Different Operations: Capture and Host Bind
-
-The successful workflow has two stages:
+## 🧭 Current Standard Workflow
 
 ```text
-New physical finger
-    ↓ experimental Python SDCP enrollment
-New template stored on the sensor
-    ↓ existing goodixsdcp C driver: on-chip match + host bind
-Linux FpPrint / fprintd registration
-    ↓ existing verification path
+KDE / fprintd EnrollStart
+    ↓ fprintd duplicate precheck
+native goodixsdcp C driver
+    ↓ firmware guard + existing Type-4 identity snapshot
+fresh authenticated SDCP sessions + thirteen accepted captures
+    ↓ duplicate check + single Type-4 commit + exact readback
+normal FpPrint / fprintd registration
+    ↓ standard verification
 Linux authentication
 ```
 
-The Python experiment performs the real template construction and storage. The C driver then associates the already stored template with the requested Linux finger. Its existing `fprintd-enroll` path does not collect thirteen samples and does not implement a new `a4` commit.
+Build and install the updated C source as described in the [README](../README.md#-building--installing-the-driver). The public static AES/HMAC transport constants must be configured locally. Then use KDE System Settings → Users → Fingerprint, or:
 
-Consequently, “Windows-enrolled finger” is no longer an accurate description of every finger that can be bound by this driver. A Linux-created Type-4 template can be bound too.
+```bash
+fprintd-enroll -f right-index-finger
+fprintd-verify -f right-index-finger
+```
 
-No system-wide driver replacement, PAM changes, firmware flashing, or MCU configuration upload was needed for the successful experiment. fprintd was initially inactive; it was later activated for binding and verification.
+Choose the intended account and a free finger slot. KDE and fprintd use the same native driver. No external capture client, bind script, TPM call or Windows session is part of additional enrollment. Existing Type-4 identity metadata is still necessary. Existing host references retain their representation and do not need conversion.
+
+The driver reports thirteen enrollment stages; fprintd exposes fourteen including its precheck. Low-quality or overlapping placements retry without advancing. Lift the finger completely between samples and vary its position.
 
 ---
 
-## 🛠️ Reproducing the Tested Workflow
+## 🔬 Historical Python Workflow — Protocol Research
+
+The following procedure records the earlier successful proof of concept. It created a template in Python, then used the **old** C driver to bind it to Linux. It is retained for protocol research and reproduction of the earlier experiment. The updated C driver performs new capture itself; its `fprintd-enroll` must no longer be treated as a bind-only command for a template created separately.
 
 ### 1. Prerequisites
+
 
 - An existing, valid **Type-4 record** on the sensor. The tool reuses its identity metadata; it does not generate an initial Windows SID or provision an empty device.
 - The exact tested firmware, `01010032`.
@@ -78,7 +90,7 @@ chmod 700 experiments/private
 
 ### Public Transport-Key Setup (Required for SDCP)
 
-The original public release deliberately redacts its static AES/HMAC transport constants. This update preserves that policy. The successful hardware tests used a locally configured crypto module and the existing working C driver, not the public zero defaults.
+The original public release deliberately redacts its static AES/HMAC transport constants. This update preserves that policy. The successful hardware tests used a locally configured crypto module and a locally configured C driver, not the public zero defaults.
 
 The read-only `d0/a6` probe does not need those constants. Encrypted SDCP does: configure **`GOODIX_AES_KEY`** with the locally derived16-byte AES key (32 hex characters), and **`GOODIX_MAC_KEY`** with the32-byte HMAC key (64 hex characters), in the environment of the Python process. The new client rejects zero/invalid keys before opening USB for an SDCP operation. `GOODIX_KI` alone does not automatically populate the two key variables in the existing crypto module.
 
@@ -92,7 +104,7 @@ python3 protocol/emulate_ki.py
 
 Its output contains locally derived keys. Keep that output private and transfer the values into your local environment; do not paste it into issues or commits. DLL offsets are build-specific. The portable emulator path was checked offline against the local compatible vendor DLL: both derived transport keys matched the working installation, without publishing the values.
 
-If rebuilding the C driver from this public source, its deliberately redacted transport constants must also be configured locally. Exporting Python environment variables does not configure the compiled C driver. An already working goodixsdcp installation can be retained, as in the hardware test.
+If rebuilding the C driver from this public source, its deliberately redacted transport constants must also be configured locally. Exporting Python environment variables does not configure the compiled C driver. For native desktop enrollment, install the updated C source with locally configured transport constants. Retaining an older bind-only binary does not add native capture.
 
 The offline tests use synthetic keys/peers and can pass without real transport keys. Passing them establishes software behavior, not live sensor connectivity with placeholders.
 
@@ -183,7 +195,7 @@ The sensor assigns part of the stored account field during commit. The program t
 
 This checks the on-chip matching result and record association. It does not implement full Windows credential release or full cryptographic verification of the complete returned match-token structure.
 
-### 6. Bind the Stored Finger to Linux and Verify
+### 6. Historical Bind with the Old Driver and Verification
 
 After the standalone program has exited:
 
@@ -192,7 +204,7 @@ fprintd-enroll -f right-little-finger
 fprintd-verify -f right-little-finger
 ```
 
-For the tested C driver, the first command binds the already stored fingerprint. The second must finish with:
+For the old bind-only C driver used in the initial experiment, the first command bound the already stored fingerprint. Do not use this as a bind procedure with the updated native-capture driver. The second must finish with:
 
 ```text
 Verify result: verify-match (done)
@@ -301,7 +313,7 @@ Older sections of `HANDOVER_COWORK.md` are retained as history. The November cor
 python3 -m unittest discover -s tests -q
 ```
 
-**40 offline tests pass in the public package** (38 original checks plus two public key-configuration guards): metadata transport, CRC integrity, ACKs, fragmentation, resource cleanup, command boundaries, actual ECDH-derived server MACs, bad-MAC rejection, reconnect verification, the 13-update trace policy, private references, lost commit replies, cleanup failures and target-record resolution.
+**51 Python tests pass in the public package** (40 protocol/tool checks, eight actual C crypto tests and three protected-installer tests). Thirteen additional native driver simulations run through the actual libfprint API using fake USB responses. The tests cover: metadata transport, CRC integrity, ACKs, fragmentation, resource cleanup, command boundaries, actual ECDH-derived server MACs, bad-MAC rejection, reconnect verification, the 13-update trace policy, private references, lost commit replies, cleanup failures and target-record resolution.
 
 The isolated regular-driver investigation is included as `goodixmoc-6f94-safe.patch` and `goodixmoc_trial.c`. The patch targets the project's local libfprint-1.94.5 baseline and is a diagnostic artifact, not an upstream-ready or version-independent patch. It disables configuration writes, deletion and automatic resets for the tested device. Its Type-1 commit did not solve enrollment.
 
@@ -309,7 +321,7 @@ Remaining work:
 
 1. Reboot/cold-start validation and longer-term recognition-rate measurements.
 2. First-time provisioning with an empty template store.
-3. Integrate the demonstrated new-template SDCP path into native C enrollment.
+3. Live GUI deletion/re-enrollment and broader suspend/failure-recovery validation of the updated driver (targeted deletion is currently simulation-tested).
 4. Expand model/firmware coverage only after device-specific validation.
 5. Complete certificate-chain/firmware attestation and full match-token verification before claiming the experimental client provides the entire Windows SDCP security model.
 

@@ -2,6 +2,18 @@
 
 Latest changes first. Details can be found in `HANDOVER_COWORK.md` (section numbers).
 
+## 2026-11-09 — Native C enrollment through KDE confirmed
+
+**Result:** A new finger was enrolled directly in KDE using the updated system-wide `goodixsdcp` C driver. All thirteen native capture stages and commit/readback completed; standard fprintd verification accepted the new entry and the original right thumb. The previous two entries remain registered. Python capture and separate host bind are no longer needed for new fingerprints.
+
+**Driver:** Fresh authenticated ECDH/SDCP sessions, verified reconnects, firmware guard, thirteen-update5+8 policy, one Type-4 commit and exact preservation/readback checks. Existing FpPrint representation is retained. Packet CRC/fragmentation/command-lifetime handling, cancellation/cleanup and targeted deletion were updated. Unclaimed device-only records are protected from fprintd automatic cleanup; clear-storage is not advertised.
+
+**KDE correction:** The initial live attempt exposed a legacy identify no-match/lift-wait timeout before enrollment. The no-match path now completes immediately and reports once; an actual-API regression covers it. The subsequent KDE enrollment passed.
+
+**Checks:** 51 Python tests, 13 actual-driver simulations, two libfprint suites, native build/API compatibility, hardware open/list/cancellation, KDE enrollment and new/old standard verification passed. Targeted deletion is simulation-tested; live GUI deletion, cold-start persistence and a fresh suspend test remain open. Existing Type-4 identity metadata and firmware 01010032 are required. Public transport-key redaction is retained; no private-key binary is included.
+
+Details: [Native integration](docs/NATIVE_DRIVER_INTEGRATION.md), [enrollment guide](docs/NATIVE_ENROLLMENT.md), [hardware report](docs/HARDWARE_TEST_REPORT_2026-11.md), HANDOVER Sections61–63. The entry below describes the earlier Python proof of concept.
+
 ## 2026-11-09 — New Linux enrollment confirmed on hardware
 
 **Result:** A new right little finger, never registered in Windows Hello, was captured and committed under Linux on GF3268 firmware `01010032`. It was then matched over fresh connections, bound through the existing goodixsdcp driver and accepted by fprintd. An unregistered ring finger was rejected; the existing right thumb still verified.
@@ -18,7 +30,7 @@ Latest changes first. Details can be found in `HANDOVER_COWORK.md` (section numb
 
 **Scope:** Existing Type-4 identity metadata is reused. Empty-store provisioning, cold-start validation, complete attestation and native C capture integration remain open. The installed C driver's enrollment behavior is still bind. This result supersedes the earlier blanket TPM-only claim.
 
-Details: [Enrollment guide](docs/NATIVE_ENROLLMENT.md), [hardware report](docs/HARDWARE_TEST_REPORT_2026-11.md), HANDOVER Sections55–60.
+Details: [Enrollment guide](docs/NATIVE_ENROLLMENT.md), [hardware report](docs/HARDWARE_TEST_REPORT_2026-11.md), HANDOVER Sections 55–60.
 
 ## 2026-08-01 — Standby/Resume fixed at the root (validated)
 
