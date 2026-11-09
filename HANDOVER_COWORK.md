@@ -1,5 +1,11 @@
 # Handover & Reverse Engineering Log: Goodix GF3268 (27c6:6f94) Linux Fingerprint Driver
 
+> ## ✅ CURRENT HARDWARE-VALIDATED STATE — 2026-11-09
+> **Additional new fingerprints can now be captured and committed under Linux.**
+> See **Sections 55–60**, [Native Linux Enrollment](docs/NATIVE_ENROLLMENT.md) and the [Hardware Test Report](docs/HARDWARE_TEST_REPORT_2026-11.md).
+> The old TPM-only conclusion, `a7` identity-registration interpretation, `a0=000000` “no frame” interpretation and `74` completion heuristic are superseded.
+> The C driver's enrollment operation remains host bind; the new capture/commit path is an experimental Python tool. Empty-store provisioning and cold-start validation remain open.
+
 > ## ⚠️ ATTENTION: Sections 1–9 of this document are HISTORICAL / REFUTED
 > They describe a TLS-PSK handshake using `openssl s_client` as a proxy.
 > The sensor does **NOT** speak TLS on the wire. The following are authoritative instead:
@@ -2542,3 +2548,188 @@ Validation on hardware (2026-08-01):
 - `journalctl -u fprintd`: NO more "Cannot run while suspended"; only normal on-demand Start/Deactivate. -> Fix confirmed.
 - Note: `sudo fprintd-verify` checks the prints of the root user (empty -> NoEnrolledPrints); for isolated testing, use `fprintd-verify` without sudo or `fprintd-verify andreas`. Not a driver issue.
 - The residual risk (session loss during very long suspend) did NOT occur.
+
+---
+
+# 55. Enrollment audit: the TPM wall was not established (2026-11-08)
+
+The research archive and public release were reviewed together with newer local September prototypes. The public repository still described every new enrollment as TPM-bound, although Section51 already recorded successful additional enrollments in a Windows VM without TPM.
+
+The existing C driver was verified to implement **bind**, not new capture: finger detection → `a5` match → copy the existing sensor record into `FpPrint`. No fprintd option could enable `a1/a0/a3/a4` inside that code path.
+
+## The destructive “authorization” command
+
+The raw Windows captures provide direct evidence:
+
+```text
+a6 → two records
+a7/02 → 01 00 + one 100-byte record
+a6 → one record; exactly the supplied record is gone
+
+separate deletion capture:
+a7/02 → 02 00 + two records
+a6 → zero records
+```
+
+`01 00` and `02 00` are little-endian counts. **This is deletion, not registration.** The interpretations in Sections44–46 and51 were wrong. The old enrollment variants that sent this packet as authorization removed fingerprints themselves. A record-count decrease does not, on its own, prove a security lockout or a TPM requirement.
+
+The later September management script independently used the same count+records format for deletion. Its UI statements about enrollment after reset were not successful hardware evidence.
+
+## TPM interpretation
+
+Microsoft's SDCP specification commits an enrollment using a MAC under the connection's own negotiated key. Windows additionally keeps an authorized-enrollment database for credential release. That Windows database must not be confused with the ability to create a Linux-only sensor template.
+
+The local `GoodixSdcpVerifyAuthorizedIdentityVBS` function is a host-side IOCTL wrapper; its name is not evidence of a mandatory sensor-side TPM check. `ff` versus `9f` observations did not establish a complete firmware error dictionary. Empty-store initialization remained unproved.
+
+---
+
+# 56. Capture state machine corrected: thirteen successful updates (2026-11-08)
+
+Static analysis of the WBDI and engine adapters, checked against both successful Windows captures, resolved the capture mistakes:
+
+- `a0` returns status, Overlay and PreOverlay. Quality/Coverage belongs to `a2`.
+- **Every zero `a0` status counts**, including `00 00 00`.
+- The configured sequence has thirteen accepted updates: five with `01 64 64`, then eight with `01 64 50`.
+- `72/73` are overlap retry paths. `74` is not “finished.”
+- `a3` checks for duplicates. `a3=00` means no duplicate, not capture finalization.
+- `a2=c0` means no finger; the existing goodixsdcp driver already re-arms that condition.
+
+The saved enrollment captures contain13/13 successful updates and13/14 successful updates respectively. The extra attempt in the latter is an overlap retry. Neither uses `74` as completion.
+
+The Windows engine increments its counter at VA `0x180097835–0x180097852` based on zero status; the completion routine at `0x1800979a0` compares this count to the configured target. The WBDI `a0` dispatcher/log is at `0x18007d20b–0x18007d28d`. The Quality/Coverage log at `0x18007d444` belongs to `a2`, correcting the earlier provisional attribution.
+
+## Reconnect, not identity authorization
+
+The32-byte `e3/02 → e3/01` pair is an SDCP reconnect:
+
+```text
+request  = fresh nonce32
+response = 00 || HMAC(session_key, "reconnect\0" || nonce32)
+```
+
+The vendor host code generates fresh random bytes for this path and verifies the response with the `reconnect` label. It is not an administrator identity payload. The experiment now checks this MAC explicitly.
+
+These findings explain why the old loops could continue merging after Windows would already have completed thirteen accepted updates.
+
+---
+
+# 57. Regular goodixmoc investigated without storage repair (2026-11-08)
+
+A newer external hardware report described regular-goodixmoc enrollment for the same USB ID on a different Honor model/firmware. Rather than installing it directly, a separate build was prepared against the project's libfprint1.94.5 baseline.
+
+The regular parser successfully decoded the saved GF3268 version, list, match and enrollment-init responses. This justified testing the shared protocol while preserving the installed driver.
+
+## Isolation
+
+- Only PID6f94 exposed; firmware01010032 required.
+- USB reset in probe/open skipped.
+- C0 configuration writes and A7 deletion blocked centrally before transfer creation.
+- No automatic reset after a list error.
+- No system installation; explicit linkage to the isolated library.
+- Existing-record comparison after every attempt.
+
+## Hardware sequence and observations
+
+1. Open/list succeeded: one existing template.
+2. First enrollment initialized but did not capture. The regular state machine omitted `b0/02` before its first `a2`.
+3. Adding that volatile preparation enabled accepted samples. The next attempt ended at `a2=c0`; that normal no-finger condition was then handled as a bounded wait/re-arm.
+4. The corrected attempt accepted all thirteen updates, passed `a3=00`, and rejected the ordinary **Type-1** `a4` with `9f`.
+5. Postcheck after the attempts: original entry preserved, no additional stored template.
+
+The result isolated the remaining difference to the storage path, rather than capture or a mathematically inaccessible TPM key. The diagnostic patch and harness are included under `experiments/`; they are baseline-specific investigation artifacts, not an upstream-ready regular-driver solution.
+
+---
+
+# 58. ★★★ NEW FINGER ENROLLED UNDER LINUX — SDCP commit works (2026-11-09)
+
+The new experimental client first established two fresh SDCP sessions, checked different keys and validated reconnect responses. The original record remained byte-for-byte unchanged.
+
+After user confirmation, it captured a **new right little finger**, previously registered in neither Windows nor Linux:
+
+```text
+fresh verified SDCP connection
+→ b0/e0 preparation
+→ a1: fresh enrollment nonce
+→ 13 accepted updates, each with verified reconnect + b0 + a2 + a0
+→ a3 = 00 (no duplicate)
+→ one Type-4 a4 commit
+→ success
+→ a6: two records instead of one
+```
+
+The commit identifier is:
+
+```text
+id = HMAC-SHA256(session_key, "enroll\0" || a1_response[1:33])
+```
+
+The existing Type-4 identity metadata was reused. The record has a6-byte header,16-byte prepared account field,16 zero bytes,32-byte enrollment identifier, identity length28,28-byte SID metadata and a zero terminator. The stored-record flag is normalized for commit.
+
+**Confirmed on hardware:** one successful commit, exactly one new record, expected enrollment identifier present, every original record byte retained. No Windows execution or TPM operation was required for this additional finger.
+
+Private0600 snapshots preserve the before state, prepared commit and actual after state. The commit is never retried automatically, including after uncertain responses. C0/A7, reset and detach paths are excluded from the new client.
+
+This is the first demonstrated new-template enrollment in this project. It does not establish empty-store provisioning.
+
+---
+
+# 59. New-finger verification, negative control and Linux bind (2026-11-09)
+
+The sensor replaces part of the prepared account field when committing a record. The first verification helper therefore incorrectly rejected target association even when the expected enrollment identifier was stored. The helper was corrected to resolve the stored record by its32-byte enrollment identifier before comparing the match response. No template rewrite was necessary.
+
+A new SDCP connection then produced a target-specific match for the right little finger. One individual placement returned no match and another attempt timed out waiting for a fresh touch; a flat central placement matched with quality39 and coverage100. This is functional validation, not an error-rate study.
+
+Negative control: the unregistered right ring finger was rejected, with quality31 and coverage83. Record preservation checks passed after matching.
+
+## Existing installed driver, unchanged
+
+```text
+fprintd-enroll -f right-little-finger → enroll-completed
+fprintd-verify -f right-little-finger → verify-match
+fprintd-verify -f right-thumb         → verify-match
+```
+
+The Python client created the new sensor template. The existing C driver bound it to Linux and verified it. Both the new little finger and the original thumb are listed by fprintd and remain usable.
+
+No new system library was installed and no PAM configuration changed during this validation. Existing desktop/PAM integration remains the prior project setup; the directly observed new-finger integration result is fprintd verification.
+
+---
+
+# 60. Current authoritative status, reproduction and open work (2026-11-09)
+
+## Working workflow
+
+1. Read-only probe: `scripts/goodix_probe.py --live --list` via Python.
+2. Finger-free session test: `experiments/goodix_sdcp_trial.py --session-check`.
+3. New capture/commit: the same tool with `--enroll --reference <new-private-file>`.
+4. Target-specific match: `experiments/goodix_match_trial.py --target-reference <commit-file>`.
+5. Existing C-driver bind and verification through fprintd.
+
+Complete commands, prerequisites and metadata handling: [Native Linux Enrollment](docs/NATIVE_ENROLLMENT.md).
+Chronological evidence, unsuccessful attempts and sanitized outputs: [Hardware Test Report](docs/HARDWARE_TEST_REPORT_2026-11.md).
+
+## Checks
+
+**38 offline tests passed:**14 probe tests,21 SDCP policy/session tests and3 matching tests. These include actual ECDH/KDF with a simulated peer, bad server/reconnect MACs, command boundaries, the saved thirteen-update trace policy, lost commit responses without retry, private file handling and sensor-assigned account fields.
+
+The original goodixmoc replay test was skipped because umockdev-run was unavailable; it is not counted as passed. The isolated build compiled successfully.
+
+## Honest limits
+
+- **Provisioned sensor required.** An existing valid Type-4 identity is reused. No Linux-only empty-store initialization is claimed.
+- **Python capture + C bind.** New capture/commit is not yet integrated into native C enrollment or the desktop GUI.
+- **Firmware-specific.** GF3268/01010032 is verified; other firmware requires separate validation.
+- **No cold-start test yet.** Storage and matching across fresh connections are confirmed; reboot persistence remains to be checked.
+- **No full attestation claim.** Server key confirmation and reconnect MACs are checked; full certificate-chain/firmware attestation and complete match-token verification remain future work.
+- **No published private records.** Before/commit/after references, actual SIDs and enrollment IDs remain local and excluded from Git.
+
+The old blanket statement “new enrollment is TPM-bound and only possible under Windows” is superseded by this hardware result. The remaining first-provisioning question must be investigated separately.
+
+
+## Public package addendum: transport-key redaction preserved
+
+The successful hardware tests used locally configured transport keys. Public AES/HMAC constants remain redacted as in the previous release. The exported tools use `protocol/goodix_crypto.py`, whose zero defaults cannot operate the actual encrypted channel. Configure private `GOODIX_AES_KEY` / `GOODIX_MAC_KEY`; `GOODIX_KI` alone does not configure those two variables.
+
+The public SDCP client rejects missing/zero/invalid keys before live USB use. Read-only metadata probing needs no keys. The vendor emulator now resolves its helpers through `protocol/re_tools` and accepts `GOODIX_SENSOR_ADAPTER_DLL`; offline derivation from the compatible local DLL reproduced both working keys without publishing them. These are build-specific vendor constants, not TPM-exported secrets.
+
+The final public suite has **40 passing tests**, including the38 original experiment checks and two public key-configuration guards. Offline synthetic-peer tests do not prove sensor operation with redacted placeholders. Full setup details are in the enrollment guide.

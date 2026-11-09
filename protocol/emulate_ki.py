@@ -14,7 +14,7 @@ Die gesamte importierte CRT (malloc/calloc/HeapAlloc/free/...) wird ueber eine
 gehookte Trampolin-Seite emuliert. Danach Verifikation gegen die Captures.
 
     sudo pacman -S python-unicorn        (CachyOS/Arch)
-    python3 scratch/emulate_ki.py
+    GOODIX_SENSOR_ADAPTER_DLL=/path/to/GoodixMocSensorAdapter.dll python3 protocol/emulate_ki.py
 """
 
 import os
@@ -23,7 +23,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-sys.path.insert(0, os.path.join(ROOT, "scratch", "re_tools"))
+sys.path.insert(0, os.path.join(HERE, "re_tools"))
 
 try:
     from unicorn import *
@@ -34,7 +34,7 @@ except ImportError:
 
 from pe import PE
 
-DLL = os.path.join(ROOT, "windows_driver_binaries", "GoodixMocSensorAdapter.dll")
+DLL = os.environ.get("GOODIX_SENSOR_ADAPTER_DLL", os.path.join(ROOT, "windows_binaries", "GoodixMocSensorAdapter.dll"))
 IMAGE_BASE = 0x180000000
 FUN_MASTER = 0x180034be0    # fuellt KI[0:16]
 FUN_MASTER2 = 0x180033960   # fuellt KI[16:32] (auf dem Stack direkt hinter local_c0)

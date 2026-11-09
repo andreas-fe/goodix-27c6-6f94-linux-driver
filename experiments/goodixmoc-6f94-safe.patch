@@ -1,0 +1,338 @@
+--- a/libfprint/drivers/goodixmoc/goodix.c
++++ b/libfprint/drivers/goodixmoc/goodix.c
+@@ -62,6 +62,14 @@
+ 
+ G_DEFINE_TYPE (FpiDeviceGoodixMoc, fpi_device_goodixmoc, FP_TYPE_DEVICE)
+ 
++/* Experimental 27c6:6f94 path: preserve the sensor's current configuration
++ * and stored templates while evaluating the standard MOC protocol. */
++static gboolean
++is_gf3268_experiment (FpDevice *device)
++{
++  return g_usb_device_get_pid (fpi_device_get_usb_device (device)) == 0x6f94;
++}
++
+ typedef void (*SynCmdMsgCallback) (FpiDeviceGoodixMoc  *self,
+                                    gxfp_cmd_response_t *resp,
+                                    GError              *error);
+@@ -206,6 +214,9 @@
+                                                      header.cmd0));
+       return;
+     }
++  if (is_gf3268_experiment (device) && g_getenv ("GOODIX_TRIAL_TRACE"))
++    g_printerr ("GOODIX_TRIAL cmd=%02x/%02x status=%02x\n",
++                header.cmd0, header.cmd1, cmd_reponse.result);
+   if (data->callback)
+     data->callback (self, &cmd_reponse, NULL);
+ 
+@@ -326,6 +337,19 @@
+ 
+   g_autoptr(FpiUsbTransfer) transfer = NULL;
+ 
++  if (is_gf3268_experiment (FP_DEVICE (self)) &&
++      (cmd0 == MOC_CMD0_UPDATE_CONFIG || cmd0 == MOC_CMD0_DELETETEMPLATE))
++    {
++      GError *error = fpi_device_error_new_msg (FP_DEVICE_ERROR_NOT_SUPPORTED,
++                                               "GF3268 experiment blocks command 0x%02x; configuration and templates preserved",
++                                               cmd0);
++      if (callback)
++        callback (self, NULL, error);
++      else
++        g_error_free (error);
++      return;
++    }
++
+   CommandData *data = g_new0 (CommandData, 1);
+ 
+   transfer = alloc_cmd_transfer (FP_DEVICE (self), cmd0, cmd1, payload, payload_len);
+@@ -644,8 +668,21 @@
+       fpi_ssm_mark_failed (self->task_ssm, error);
+       return;
+     }
++  if (is_gf3268_experiment (FP_DEVICE (self)) &&
++      (resp == NULL || resp->result != GX_SUCCESS))
++    {
++      fpi_ssm_mark_failed (self->task_ssm,
++                           fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
++                                                     "GF3268 enrollment initialization failed: 0x%02x",
++                                                     resp ? resp->result : 0xff));
++      return;
++    }
+   memcpy (self->template_id, resp->enroll_create.tid, TEMPLATE_ID_SIZE);
+-  fpi_ssm_next_state (self->task_ssm);
++  if (is_gf3268_experiment (FP_DEVICE (self)))
++    /* B0/02 prepares the first acquisition as well as subsequent samples. */
++    fpi_ssm_jump_to_state (self->task_ssm, FP_ENROLL_WAIT_FINGER_UP);
++  else
++    fpi_ssm_next_state (self->task_ssm);
+ }
+ 
+ static void
+@@ -656,6 +693,31 @@
+   if (error)
+     {
+       fpi_ssm_mark_failed (self->task_ssm, error);
++      return;
++    }
++  if (is_gf3268_experiment (FP_DEVICE (self)) && resp->result == 0xc0)
++    {
++      /* No finger: the existing SDCP arm path also rearms on 0xc0. Never
++       * advance to A0 or credit a sample until a successful A2 response. */
++      fpi_device_report_finger_status_changes (FP_DEVICE (self),
++                                               FP_FINGER_STATUS_NEEDED,
++                                               FP_FINGER_STATUS_PRESENT);
++      fpi_ssm_jump_to_state_delayed (self->task_ssm, FP_ENROLL_WAIT_FINGER_UP, 200);
++      return;
++    }
++  if (is_gf3268_experiment (FP_DEVICE (self)) && resp->result != GX_SUCCESS)
++    {
++      if (resp->result == 0x71 || resp->result == 0x72 || resp->result == 0x73)
++        {
++          fpi_device_enroll_progress (FP_DEVICE (self), self->enroll_stage, NULL,
++                                      fpi_device_retry_new (FP_DEVICE_RETRY_GENERAL));
++          fpi_ssm_jump_to_state (self->task_ssm, FP_ENROLL_WAIT_FINGER_UP);
++        }
++      else
++        fpi_ssm_mark_failed (self->task_ssm,
++                             fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
++                                                       "GF3268 capture status: 0x%02x",
++                                                       resp->result));
+       return;
+     }
+   /* */
+@@ -666,7 +728,9 @@
+                                   self->enroll_stage,
+                                   NULL,
+                                   fpi_device_retry_new (FP_DEVICE_RETRY_GENERAL));
+-      fpi_ssm_jump_to_state (self->task_ssm, FP_ENROLL_CAPTURE);
++      fpi_ssm_jump_to_state (self->task_ssm,
++                             is_gf3268_experiment (FP_DEVICE (self)) ?
++                               FP_ENROLL_WAIT_FINGER_UP : FP_ENROLL_CAPTURE);
+       return;
+     }
+   fpi_device_report_finger_status_changes (FP_DEVICE (self),
+@@ -684,7 +748,9 @@
+                                   self->enroll_stage,
+                                   NULL,
+                                   fpi_device_retry_new (FP_DEVICE_RETRY_CENTER_FINGER));
+-      fpi_ssm_jump_to_state (self->task_ssm, FP_ENROLL_CAPTURE);
++      fpi_ssm_jump_to_state (self->task_ssm,
++                             is_gf3268_experiment (FP_DEVICE (self)) ?
++                               FP_ENROLL_WAIT_FINGER_UP : FP_ENROLL_CAPTURE);
+       return;
+     }
+   else
+@@ -701,6 +767,33 @@
+   if (error)
+     {
+       fpi_ssm_mark_failed (self->task_ssm, error);
++      return;
++    }
++
++  if (is_gf3268_experiment (FP_DEVICE (self)))
++    {
++      /* 01010032 Windows engine counts every successful update, including
++       * 00 00 00. These bytes are not cumulative enrollment progress. */
++      if (resp->result == GX_SUCCESS)
++        {
++          self->enroll_stage++;
++          fpi_device_enroll_progress (FP_DEVICE (self), self->enroll_stage, NULL, NULL);
++        }
++      else if (resp->result == 0x72 || resp->result == 0x73)
++        fpi_device_enroll_progress (FP_DEVICE (self), self->enroll_stage, NULL,
++                                    fpi_device_retry_new (FP_DEVICE_RETRY_REMOVE_FINGER));
++      else
++        {
++          fpi_ssm_mark_failed (self->task_ssm,
++                               fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
++                                                         "GF3268 enrollment update status: 0x%02x",
++                                                         resp->result));
++          return;
++        }
++      if (self->enroll_stage >= self->max_enroll_stage)
++        fpi_ssm_jump_to_state (self->task_ssm, FP_ENROLL_CHECK_DUPLICATE);
++      else
++        fpi_ssm_next_state (self->task_ssm);
+       return;
+     }
+ 
+@@ -871,6 +964,14 @@
+       fpi_device_report_finger_status_changes (device,
+                                                FP_FINGER_STATUS_NEEDED,
+                                                FP_FINGER_STATUS_NONE);
++      if (is_gf3268_experiment (device))
++        {
++          /* Exact Windows 01010032 capture thresholds and mode byte. */
++          const guint8 capture[] = { 0x00, 0x0f, 0x41, 0x01 };
++          goodix_sensor_cmd (self, MOC_CMD0_CAPTURE_DATA, MOC_CMD1_DEFAULT,
++                             true, capture, sizeof (capture), fp_enroll_capture_cb);
++          break;
++        }
+       goodix_sensor_cmd (self, MOC_CMD0_CAPTURE_DATA, MOC_CMD1_DEFAULT,
+                          true,
+                          (const guint8 *) &dummy,
+@@ -882,6 +983,8 @@
+       dummy[0] = 1;
+       dummy[1] = self->sensorcfg->config[2];
+       dummy[2] = self->sensorcfg->config[3];
++      if (is_gf3268_experiment (device) && self->enroll_stage < 5)
++        dummy[2] = 0x64;
+       goodix_sensor_cmd (self, MOC_CMD0_ENROLL, MOC_CMD1_DEFAULT,
+                          false,
+                          (const guint8 *) &dummy,
+@@ -902,7 +1005,7 @@
+       goodix_sensor_cmd (self, MOC_CMD0_CHECK4DUPLICATE, MOC_CMD1_DEFAULT,
+                          false,
+                          (const guint8 *) &dummy,
+-                         3,
++                         is_gf3268_experiment (device) ? 1 : 3,
+                          fp_enroll_check_duplicate_cb);
+       break;
+ 
+@@ -1024,6 +1127,14 @@
+     }
+   fw_version = g_strndup ((const char *) resp->version_info.fwversion, sizeof (resp->version_info.fwversion));
+   fp_info ("Firmware version: %s", fw_version);
++  if (is_gf3268_experiment (FP_DEVICE (self)) &&
++      g_strcmp0 (fw_version, "01010032") != 0)
++    {
++      fpi_ssm_mark_failed (self->task_ssm,
++                           fpi_device_error_new_msg (FP_DEVICE_ERROR_NOT_SUPPORTED,
++                                                     "GF3268 trial supports only firmware 01010032"));
++      return;
++    }
+   fpi_ssm_next_state (self->task_ssm);
+ }
+ 
+@@ -1046,6 +1157,22 @@
+                               gxfp_cmd_response_t *resp,
+                               GError              *error)
+ {
++  if (is_gf3268_experiment (FP_DEVICE (self)))
++    {
++      /* A Windows-format record or a protocol mismatch is not permission to
++       * reset storage. Report the error without any recovery writes. */
++      if (error)
++        fpi_ssm_mark_failed (self->task_ssm, error);
++      else if (resp->result != GX_SUCCESS)
++        fpi_ssm_mark_failed (self->task_ssm,
++                             fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
++                                                       "GF3268 template query failed: 0x%x; storage preserved",
++                                                       resp->result));
++      else
++        fpi_ssm_mark_completed (self->task_ssm);
++      return;
++    }
++
+   if (error)
+     {
+       fp_warn ("Template storage appears to have been corrupted! Error was: %s", error->message);
+@@ -1100,6 +1227,13 @@
+       break;
+ 
+     case FP_INIT_CONFIG:
++      if (is_gf3268_experiment (device))
++        {
++          /* Host-side thresholds were initialized by gx_fp_init(). Do not
++           * upload them: the persistent MCU configuration remains untouched. */
++          fpi_ssm_next_state (ssm);
++          break;
++        }
+       goodix_sensor_cmd (self, MOC_CMD0_UPDATE_CONFIG, MOC_CMD1_WRITE_CFG_TO_FLASH,
+                          false,
+                          (guint8 *) self->sensorcfg,
+@@ -1123,6 +1257,13 @@
+       break;
+ 
+     case FP_INIT_RESET_DEVICE:
++      if (is_gf3268_experiment (device))
++        {
++          fpi_ssm_mark_failed (ssm,
++                               fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
++                                                         "GF3268 automatic storage reset is disabled"));
++          break;
++        }
+       fp_warn ("Resetting device storage, you will need to enroll all prints again!");
+       goodix_sensor_cmd (self, MOC_CMD0_DELETETEMPLATE, MOC_CMD1_DELETE_ALL,
+                          FALSE,
+@@ -1328,7 +1469,7 @@
+       return;
+     }
+ 
+-  if (!g_usb_device_reset (usb_dev, &error))
++  if (!is_gf3268_experiment (device) && !g_usb_device_reset (usb_dev, &error))
+     goto err_close;
+ 
+   if (!g_usb_device_claim_interface (usb_dev, 0, 0, &error))
+@@ -1377,6 +1518,11 @@
+       self->max_enroll_stage = 12;
+       break;
+ 
++    case 0x6F94:
++      /* The retained 01010032 configuration and Windows engine use 13. */
++      self->max_enroll_stage = 13;
++      break;
++
+     default:
+       self->max_enroll_stage = DEFAULT_ENROLL_SAMPLES;
+       break;
+@@ -1415,7 +1561,8 @@
+     }
+   self->sensorcfg->config[6] = self->max_enroll_stage;
+ 
+-  if (!g_usb_device_reset (fpi_device_get_usb_device (device), &error))
++  if (!is_gf3268_experiment (device) &&
++      !g_usb_device_reset (fpi_device_get_usb_device (device), &error))
+     {
+       fpi_device_open_complete (FP_DEVICE (self), error);
+       return;
+@@ -1460,7 +1607,14 @@
+                gxfp_cmd_response_t *resp,
+                GError              *error)
+ {
+-
++  if (error || resp == NULL)
++    {
++      self->is_power_button_shield_on = false;
++      gx_fp_release_interface (self, error ? error :
++                                fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
++                                                          "Missing power shield response on close"));
++      return;
++    }
+ 
+   if (resp->result >= GX_FAILED)
+     fp_dbg ("Setting power button shield failed, result: 0x%x", resp->result);
+@@ -1603,30 +1757,9 @@
+ }
+ 
+ static const FpIdEntry id_table[] = {
+-  { .vid = 0x27c6,  .pid = 0x5840,  },
+-  { .vid = 0x27c6,  .pid = 0x6014,  },
+-  { .vid = 0x27c6,  .pid = 0x6092,  },
+-  { .vid = 0x27c6,  .pid = 0x6094,  },
+-  { .vid = 0x27c6,  .pid = 0x609C,  },
+-  { .vid = 0x27c6,  .pid = 0x60A2,  },
+-  { .vid = 0x27c6,  .pid = 0x60A4,  },
+-  { .vid = 0x27c6,  .pid = 0x60BC,  },
+-  { .vid = 0x27c6,  .pid = 0x631C,  },
+-  { .vid = 0x27c6,  .pid = 0x634C,  },
+-  { .vid = 0x27c6,  .pid = 0x6384,  },
+-  { .vid = 0x27c6,  .pid = 0x639C,  },
+-  { .vid = 0x27c6,  .pid = 0x63AC,  },
+-  { .vid = 0x27c6,  .pid = 0x63BC,  },
+-  { .vid = 0x27c6,  .pid = 0x63CC,  },
+-  { .vid = 0x27c6,  .pid = 0x6496,  },
+-  { .vid = 0x27c6,  .pid = 0x6584,  },
+-  { .vid = 0x27c6,  .pid = 0x658C,  },
+-  { .vid = 0x27c6,  .pid = 0x6592,  },
+-  { .vid = 0x27c6,  .pid = 0x6594,  },
+-  { .vid = 0x27c6,  .pid = 0x659A,  },
+-  { .vid = 0x27c6,  .pid = 0x659C,  },
+-  { .vid = 0x27c6,  .pid = 0x6A94,  },
+-  { .vid = 0,  .pid = 0,  .driver_data = 0 },   /* terminating entry */
++  /* This isolated build must never probe/reset another Goodix device. */
++  { .vid = 0x27c6,  .pid = 0x6F94,  },
++  { .vid = 0,  .pid = 0,  .driver_data = 0 },
+ };
+ 
+ 
