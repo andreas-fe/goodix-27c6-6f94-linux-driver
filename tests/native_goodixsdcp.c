@@ -23,7 +23,14 @@ typedef enum { SUCCESS, WAIT_RETRY, OVERLAP, BAD_RECONNECT, DUPLICATE,
                REJECT_COMMIT, LOST_COMMIT_REPLY, CHANGE_ORIGINAL,
                CANCEL, WRONG_FIRMWARE, EMPTY_STORE,
                OPEN_WAKE_TIMEOUT, OPEN_ALL_TIMEOUT, OPEN_HANDSHAKE_ERROR,
-               OPEN_BAD_LIST, OPEN_CLAIM_ERROR } Scenario;
+               OPEN_BAD_LIST, OPEN_CLAIM_ERROR, EMPTY_REJECT, EMPTY_LOST_REPLY,
+               IDENTIFY_RETRY } Scenario;
+
+static gboolean
+empty_scenario (Scenario test)
+{
+  return test == EMPTY_STORE || test == EMPTY_REJECT || test == EMPTY_LOST_REPLY;
+}
 static Scenario scenario;
 static GByteArray *store;
 static guint updates, commits, deletions, polls, progress_count, cleanup_count;
@@ -234,7 +241,7 @@ gsdcp_test_command (FpiDeviceGoodixSdcp *self, guint8 command, guint8 subcommand
         reply[0] = 1;
       break;
     case 0xa5:
-      reply[0] = 1; /* A new finger in fprintd's enrollment precheck. */
+      reply[0] = scenario == IDENTIFY_RETRY ? 3 : 1;
       break;
     case 0xa4:
       {
@@ -242,7 +249,7 @@ gsdcp_test_command (FpiDeviceGoodixSdcp *self, guint8 command, guint8 subcommand
         g_assert_cmpuint (commits, ==, 1);
         g_assert_cmpuint (self->enroll_samples, ==, 13);
         g_assert_cmpuint (len, ==, GSDCP_RECORD_SIZE);
-        if (scenario == REJECT_COMMIT)
+        if (scenario == REJECT_COMMIT || scenario == EMPTY_REJECT)
           {
             reply[0] = 0x9f;
             break;
@@ -253,13 +260,22 @@ gsdcp_test_command (FpiDeviceGoodixSdcp *self, guint8 command, guint8 subcommand
         g_assert_true (gsdcp_session_mac (&self->session, "enroll", nonce, 32, expected));
         g_assert_cmpmem (payload + 38, 32, expected, 32);
         guint8 stored[GSDCP_RECORD_SIZE];
+        if (empty_scenario (scenario))
+          {
+            static const guint8 prefix[] = { 1, 5, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0 };
+            g_assert_cmpuint (store->data[1], ==, 0);
+            g_assert_true (record_valid (payload));
+            g_assert_cmpmem (payload + 71, sizeof (prefix), prefix, sizeof (prefix));
+            g_assert_cmpuint (payload[95] | (payload[96] << 8), ==, 1000);
+            g_assert_cmpuint (payload[97] | payload[98], ==, 0);
+          }
         memcpy (stored, payload, GSDCP_RECORD_SIZE);
         memset (stored + 6, 't', 16); /* Sensor-assigned account ID. */
         g_byte_array_append (store, stored, sizeof (stored));
         store->data[1]++;
         if (scenario == CHANGE_ORIGINAL)
           store->data[2 + 75] ^= 1;
-        if (scenario == LOST_COMMIT_REPLY)
+        if (scenario == LOST_COMMIT_REPLY || scenario == EMPTY_LOST_REPLY)
           error = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_TIMED_OUT, "Lost commit reply");
         break;
       }
@@ -328,7 +344,7 @@ setup_device (Scenario test)
   store = g_byte_array_new ();
   guint8 count[2] = { 0 };
   g_byte_array_append (store, count, 2);
-  if (test != EMPTY_STORE)
+  if (!empty_scenario (test))
     add_record (1);
   FpDeviceClass *klass = g_type_class_ref (fpi_device_goodixsdcp_get_type ());
   klass->type = FP_DEVICE_TYPE_VIRTUAL;
@@ -364,7 +380,9 @@ run_enroll (gconstpointer pointer)
   fp_print_set_finger (template, FP_FINGER_LEFT_INDEX);
   fp_print_set_username (template, "native-test-user");
   g_autoptr(FpPrint) result = fp_device_enroll_sync (device, template, cancel, progress, NULL, &error);
-  if (test == SUCCESS || test == WAIT_RETRY || test == OVERLAP || test == LOST_COMMIT_REPLY)
+  gboolean expected_success = test == SUCCESS || test == WAIT_RETRY || test == OVERLAP || test == LOST_COMMIT_REPLY;
+  expected_success |= test == EMPTY_STORE || test == EMPTY_LOST_REPLY;
+  if (expected_success)
     {
       g_assert_no_error (error);
       g_assert_nonnull (result);
@@ -374,17 +392,19 @@ run_enroll (gconstpointer pointer)
       g_assert_true (print_get_tid (result, tid));
       for (guint i = 0; i < sizeof (tid); i++)
         g_assert_cmpuint (tid[i], ==, 't');
-      g_assert_cmpuint (store->data[1], ==, 2);
+      g_assert_cmpuint (store->data[1], ==, empty_scenario (test) ? 1 : 2);
       g_assert_cmpuint (updates, ==, test == OVERLAP ? 14 : 13);
     }
   else
     {
       g_assert_nonnull (error);
       g_assert_null (result);
-      if (test != CHANGE_ORIGINAL && test != REJECT_COMMIT)
+      if (test != CHANGE_ORIGINAL && test != REJECT_COMMIT && test != EMPTY_REJECT)
         g_assert_cmpuint (commits, ==, 0);
       if (test != CHANGE_ORIGINAL)
-        g_assert_cmpuint (store->data[1], ==, test == EMPTY_STORE ? 0 : 1);
+        g_assert_cmpuint (store->data[1], ==, empty_scenario (test) ? 0 : 1);
+      if (test == EMPTY_REJECT)
+        g_assert_cmpuint (commits, ==, 1);
     }
   g_assert_cmpuint (deletions, ==, 0);
   g_assert_cmpuint (cleanup_count, ==, 1);
@@ -511,6 +531,47 @@ identify_finished (GObject *source, GAsyncResult *result, gpointer user_data)
 }
 
 static void
+retry_reported (FpDevice *device, FpPrint *match, FpPrint *print, gpointer user_data, GError *error)
+{
+  g_assert_null (match);
+  g_assert_null (print);
+  g_assert_error (error, FP_DEVICE_RETRY, FP_DEVICE_RETRY_CENTER_FINGER);
+  (*(guint *) user_data)++;
+}
+
+static void
+run_identify_retry (void)
+{
+  g_autoptr(FpDevice) device = setup_device (IDENTIFY_RETRY);
+  g_autoptr(GPtrArray) gallery = g_ptr_array_new ();
+  g_autoptr(GError) error = NULL;
+  guint reports = 0;
+  g_assert_false (fp_device_identify_sync (device, gallery, NULL, retry_reported, &reports, NULL, NULL, &error));
+  g_assert_error (error, FP_DEVICE_RETRY, FP_DEVICE_RETRY_CENTER_FINGER);
+  g_clear_error (&error);
+  g_assert_cmpuint (reports, ==, 1);
+  g_assert_cmpuint (polls, ==, 1);
+  g_assert_cmpuint (commits, ==, 0);
+  g_assert_true (fp_device_close_sync (device, NULL, &error));
+  g_byte_array_unref (store);
+}
+
+static void
+run_empty_precheck (void)
+{
+  g_autoptr(FpDevice) device = setup_device (EMPTY_STORE);
+  cache_record_list (FPI_DEVICE_GOODIXSDCP (device), store->data);
+  g_autoptr(GPtrArray) gallery = g_ptr_array_new ();
+  g_autoptr(GError) error = NULL;
+  g_assert_true (fp_device_identify_sync (device, gallery, NULL, NULL, NULL, NULL, NULL, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (polls, ==, 0);
+  g_assert_cmpuint (commits, ==, 0);
+  g_assert_true (fp_device_close_sync (device, NULL, &error));
+  g_byte_array_unref (store);
+}
+
+static void
 run_active_suspend (void)
 {
   g_autoptr(FpDevice) device = setup_device (SUCCESS);
@@ -566,5 +627,9 @@ main (int argc, char **argv)
       g_test_add_data_func (path, GINT_TO_POINTER (OPEN_WAKE_TIMEOUT + i), run_open_recovery);
     }
   g_test_add_func ("/goodixsdcp/suspend/active-identify-refreshes-and-completes", run_active_suspend);
+  g_test_add_func ("/goodixsdcp/identify/retry-reported-once-without-general-error", run_identify_retry);
+  g_test_add_func ("/goodixsdcp/identify/empty-list-precheck-without-touch", run_empty_precheck);
+  g_test_add_data_func ("/goodixsdcp/enroll/empty-rejected-commit", GINT_TO_POINTER (EMPTY_REJECT), run_enroll);
+  g_test_add_data_func ("/goodixsdcp/enroll/empty-lost-reply", GINT_TO_POINTER (EMPTY_LOST_REPLY), run_enroll);
   return g_test_run ();
 }

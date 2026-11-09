@@ -752,6 +752,9 @@ verify_ssm_done (FpiSsm *ssm, FpDevice *dev, GError *error)
         fpi_device_verify_report (dev, FPI_MATCH_ERROR, NULL, g_error_copy (error));
       else
         fpi_device_identify_report (dev, NULL, NULL, g_error_copy (error));
+      /* Retry errors belong to the report callback, never the complete API. */
+      if (error->domain == FP_DEVICE_RETRY)
+        g_clear_error (&error);
     }
   if (fpi_device_get_current_action (dev) == FPI_DEVICE_ACTION_VERIFY)
     fpi_device_verify_complete (dev, error);
@@ -769,11 +772,43 @@ dev_verify_identify (FpDevice *device)
   g_clear_object (&self->cancel);
   self->cancel = g_cancellable_new ();
 
+  if (fpi_device_get_current_action (device) == FPI_DEVICE_ACTION_IDENTIFY &&
+      self->list_result && self->list_result->len == 0)
+    {
+      /* Fresh A6 during open confirmed an empty sensor. No stored finger can
+       * match; A5 on this firmware returns 03 in that state. Do not turn this
+       * enrollment precheck into an unnecessary finger acquisition/error. */
+      fp_dbg ("goodixsdcp: identify precheck: sensor list is empty, no match");
+      fpi_device_identify_report (device, NULL, NULL, NULL);
+      fpi_device_identify_complete (device, NULL);
+      return;
+    }
+
   self->task_ssm = fpi_ssm_new (device, verify_run_state, GSDCP_VER_NUM_STATES);
   fpi_ssm_start (self->task_ssm, verify_ssm_done);
 }
 
 /* --------------------------------------------------------- native enroll */
+
+/* A fresh local SID-shaped identity, not a Windows credential.
+ * This tests an emptied, previously provisioned sensor, not a factory reset.
+ * No old record, cached SID, host reference or vendor configuration is read. */
+static gboolean
+prepare_empty_identity (guint8 record[GSDCP_RECORD_SIZE])
+{
+  static const guint8 header[] = { 0x62, 0, 0x43, 4, 0xf5, 0 };
+  static const guint8 sid_prefix[] = { 1, 5, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0 };
+  memset (record, 0, GSDCP_RECORD_SIZE);
+  memcpy (record, header, sizeof (header));
+  record[70] = 28;
+  memcpy (record + 71, sid_prefix, sizeof (sid_prefix));
+  if (!gsdcp_random (record + 83, 12))
+    return FALSE;
+  /* S-1-5-21-<three random subauthorities>-1000, little-endian RID. */
+  record[95] = 0xe8;
+  record[96] = 3;
+  return TRUE;
+}
 
 static void
 enroll_abort (FpiDeviceGoodixSdcp *self, GError *error)
@@ -837,16 +872,23 @@ enroll_step_cb (FpiDeviceGoodixSdcp *self, const guint8 *data, gsize len, GError
           enroll_abort (self, fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO, "Invalid enrollment template list"));
           return;
         }
-      if (data[1] == 0 || data[1] == 20)
+      if (data[1] == 20)
         {
-          enroll_abort (self, fpi_device_error_new_msg (
-                         data[1] == 0 ? FP_DEVICE_ERROR_NOT_SUPPORTED : FP_DEVICE_ERROR_DATA_FULL,
-                         data[1] == 0 ? "Initial sensor provisioning is required before native enrollment" :
-                                        "Fingerprint storage is full"));
+          enroll_abort (self, fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_FULL, "Fingerprint storage is full"));
           return;
         }
+      if (data[1] == 0)
+        {
+          if (!prepare_empty_identity (self->enroll_record))
+            {
+              enroll_abort (self, fpi_device_error_new (FP_DEVICE_ERROR_GENERAL));
+              return;
+            }
+          fp_info ("goodixsdcp: empty template store: fresh local identity, no prior-record metadata");
+        }
+      else
+        memcpy (self->enroll_record, data + 2, GSDCP_RECORD_SIZE);
       self->enroll_before = g_bytes_new (data, len);
-      memcpy (self->enroll_record, data + 2, GSDCP_RECORD_SIZE);
     }
   else if (state == GSDCP_EN_POST_LIST)
     {

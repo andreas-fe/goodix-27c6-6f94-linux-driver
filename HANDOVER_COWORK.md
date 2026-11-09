@@ -1,8 +1,10 @@
 # Handover & Reverse Engineering Log: Goodix GF3268 (27c6:6f94) Linux Fingerprint Driver
+> **Latest authoritative state:** Native enrollment after complete template deletion is now confirmed, with a new local identity and no old SID/record. Independent zero→one sensor evidence, fprintd verification and practical unlock passed. Factory-reset provisioning remains untested. See Sections65–67 and [the full report](docs/EMPTY_STORE_ENROLLMENT.md). Older existing-record-only limitations are historical.
+
 
 > ## ✅ CURRENT HARDWARE-VALIDATED STATE — 2026-11-09
 > **Additional new fingerprints can now be captured and committed under Linux.**
-> See **Sections 55–64**, [Native Linux Enrollment](docs/NATIVE_ENROLLMENT.md) and the [Hardware Test Report](docs/HARDWARE_TEST_REPORT_2026-11.md).
+> See **Sections 55–67**, [Native Linux Enrollment](docs/NATIVE_ENROLLMENT.md) and the [Hardware Test Report](docs/HARDWARE_TEST_REPORT_2026-11.md).
 > The old TPM-only conclusion, `a7` identity-registration interpretation, `a0=000000` “no frame” interpretation and `74` completion heuristic are superseded.
 > **Native C integration is now hardware-validated through KDE.** New capture/commit runs inside libfprint; separate Python capture and host bind are no longer required. New-finger and original-thumb standard verification passed. Empty-store provisioning, cold-start validation and live GUI deletion remain open. Sections 55–60 retain the preceding Python experiment chronology.
 
@@ -2800,3 +2802,42 @@ The corrected library was installed with a private previous-library/reference ba
 This is direct validation of the new recovery branch under the reproduced initial-timeout condition. It is not a long-sleep reliability study: a corrected sleep matching the original 38-minute duration, additional pending-authentication hardware scenarios and cold boot remain open. New enrollment and deletion were not repeated after this standby; their earlier validation boundaries still apply.
 
 Detailed sanitized timestamps, behavior and test boundaries: [Standby Recovery](docs/STANDBY_RECOVERY.md).
+
+
+---
+
+# 65. Empty sensor template list: new first finger enrolled natively (2026-11-09)
+
+The user requested the last functional case: delete every finger and enroll again using only the OS standard UI. A private baseline captured the working library, host references and readable metadata; this was explicitly not a restorable biometric-template backup. Windows re-enrollment was confirmed as a fallback but was not used during the successful test.
+
+KDE first deleted only the right-index slot. Independent A6 showed3→2, selected by the saved host account ID; both other100-byte records and host reference files were unchanged. The user then deleted the thumb/little finger. Independent version/list and host checks confirmed exactly zero records and no original host registrations.
+
+The first touch failed in identify precheck, before native capture: A5 returned03, and the legacy retry was incorrectly passed to identify_complete. The new path uses the fresh empty list to report no match without touch/A5. General retry errors are reported but cleared before completion. Regression tests use the actual libfprint API.
+
+The empty enrollment path constructs a new Type-4 scaffold and fresh SID-shaped local identity with three cryptographically random32-bit subauthorities, not an original SID or saved record. The same authenticated sessions, thirteen captures, one A4 and exact readback apply. KDE completed enrollment, fprintd verified the new thumb, and the user confirmed practical unlocking. Independent postcheck found exactly one new record, a different identity from every original, and a matching new host account reference. The trial switch was removed and this behavior became the regular driver path.
+
+Other listed Windows finger records cannot explain the success: the sensor's own list was independently empty before enrollment. Persistent keys/calibration/vendor provisioning may nevertheless remain; template deletion is not a factory reset. Factory-new/factory-reset initialization remains untested. Full evidence and limits: [Empty Store Enrollment](docs/EMPTY_STORE_ENROLLMENT.md).
+
+---
+
+# 66. Independently reproducible public build (2026-11-09)
+
+The public C source was integrated into an unchanged official upstream libfprint v1.94.10 source archive, independently of the older local1.94.5 fork. It built successfully and passed23 native driver API simulations plus both libfprint SSM/device suites. The public Python suite has55 passing tests, including four new private-key configuration checks. The clean upstream build was not installed on the hardware as a replacement for the already validated local build.
+
+The pinned integration helper performs the checked Meson edits and copies source. The key configurator reads explicitly supplied private AES/HMAC transport constants, validates both before any write, refuses editing the public repository source or replacing different keys, and writes only the separate private build copy with mode0600. Derived constants and vendor binaries remain excluded. Offline placeholder-key tests are not live sensor validation.
+
+The complete dependency/source/key/build/test/install/rollback procedure is in [Build and Installation](docs/BUILD_AND_INSTALL.md). It distinguishes clean-source build reproducibility, firmware-specific hardware results and distribution ABI compatibility. The former Python capture/bind path remains historical research.
+
+---
+
+# 67. Durable local provider package and update recovery (2026-11-09)
+
+The user asked for durable installation, a local repair script and protection against distribution libfprint updates. A library version string alone cannot protect a package-owned file. Instead of an artificial huge version, the user selected a local provider package libfprint-goodixsdcp.
+
+The package retained all companion file paths from the trusted cached CachyOS libfprint1.94.100-1.1 package and substituted only the reviewed, hardware-tested library, byte-for-byte. All base-package public exports were retained. Original runtime dependencies and libfprint/shared-library provides were kept; conflicts prevents simultaneous installation with the distro libfprint package. The actual pacman transaction replaced the old package normally, without dependency bypass. Ownership, dependency satisfaction, library checksum and retained thumb registration were checked afterward.
+
+The package version1.94.100.goodix20261109-1 is local repack metadata, not the upstream source version of the custom library. No global IgnorePkg or fake epoch was set. Future relevant fixes and dependency/API changes need deliberate maintenance; explicit replacement of the custom provider can still remove support. Packages/libraries containing working constants remain private and are not release assets.
+
+A German local operating/update guide and compatibility-checking reinstall wrapper were added to the user's workspace. Public users have the generic repack helper, reviewable generated PKGBUILD and [Maintenance guide](docs/MAINTENANCE.md). The helper refuses candidate checksum mismatch, an unexpected base package or missing base public exports, and never installs automatically.
+
+User-reported reboot and longer standby/wake/unlock succeeded before the final new-local-identity test. The fresh first finger subsequently passed verification and practical unlock. Reboot/long standby after that new identity have not been separately confirmed; attestation, statistical recognition/error recovery and other firmware remain open.

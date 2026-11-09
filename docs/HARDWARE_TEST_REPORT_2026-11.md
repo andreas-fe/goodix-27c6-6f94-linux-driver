@@ -1,5 +1,8 @@
 # Goodix GF3268 — Hardware Test Report (2026-11-08 / 2026-11-09)
 
+> **Latest result — 2026-11-09:** Every sensor template was deliberately deleted, an independent read confirmed zero records, and KDE enrolled a new first finger using a freshly generated local identity. Standard verification and practical unlock passed. This supersedes the earlier existing-record prerequisite. Factory-new/factory-reset provisioning remains untested. See [the empty-store report](EMPTY_STORE_ENROLLMENT.md), [reproducible build guide](BUILD_AND_INSTALL.md) and [maintenance guide](MAINTENANCE.md).
+
+
 ## Result
 
 **✅ A previously unregistered finger was enrolled under Linux, stored as a new Type-4 record, matched over fresh connections, bound through the existing goodixsdcp driver and verified by fprintd.**
@@ -272,3 +275,7 @@ After installation, the user repeated standby with KDE open. The first setup req
 The corrected observed sleep lasted about 5 seconds, compared with approximately 38 minutes for the original failing sleep. Longer corrected cycles, broader active-authentication hardware scenarios and cold boot remain open. This follow-up did not write or delete a sensor template.
 
 Full failure/recovery chronology and exact test scope: [Standby Recovery](STANDBY_RECOVERY.md).
+
+## 11. Full deletion and first new enrollment
+
+All three templates were deliberately deleted via KDE, with independent preservation/zero-state checks. A first precheck-only failure was corrected, then a new local identity and first template were created in native enrollment. Standard thumb verification and practical unlock passed. See [the complete empty-store report](EMPTY_STORE_ENROLLMENT.md) for the zero→one evidence, fresh-identity checks and factory-provisioning distinction. The later regular source passes23 driver cases and55 Python tests; a fresh upstream1.94.10 build also passed the driver and SSM/device suites.

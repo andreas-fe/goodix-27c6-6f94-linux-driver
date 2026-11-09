@@ -1,8 +1,11 @@
 # Goodix GF3268 — Native Driver Integration (2026-11-09)
 
+> **Latest result — 2026-11-09:** Every sensor template was deliberately deleted, an independent read confirmed zero records, and KDE enrolled a new first finger using a freshly generated local identity. Standard verification and practical unlock passed. This supersedes the earlier existing-record prerequisite. Factory-new/factory-reset provisioning remains untested. See [the empty-store report](EMPTY_STORE_ENROLLMENT.md), [reproducible build guide](BUILD_AND_INSTALL.md) and [maintenance guide](MAINTENANCE.md).
+
+
 **✅ New enrollment now runs entirely inside the libfprint C driver.** KDE completed a genuinely new enrollment through fprintd; the newly registered finger and original right thumb both passed standard verification afterward.
 
-This replaces the previous Python-capture / C-host-bind workflow for additional new fingers. It does not implement first-time provisioning of an empty device.
+This replaces the previous Python-capture / C-host-bind workflow for additional new fingers. It now also supports an empty template list on the previously provisioned sensor. Factory-new/factory-reset initialization remains untested.
 
 ---
 
@@ -36,7 +39,7 @@ No Python enrollment process, separate host bind, Windows call, TPM operation or
 ## 2. Enrollment State Machine
 
 1. Read `d0`; require GF3268 firmware `01010032`.
-2. Read/validate `a6`; retain all original records and reuse valid existing Type-4 identity metadata. Empty/full stores fail explicitly.
+2. Read/validate `a6`; retain all original records and reuse valid existing Type-4 identity metadata. An empty list gets a fresh local identity; a full store fails explicitly.
 3. Establish two fresh P-256 ECDH/SDCP connections, verifying server key confirmation. Clear private ECDH material after derivation.
 4. Prepare `b0/02` and `e0/01`; get the fresh `a1` enrollment nonce.
 5. Before each capture, verify `e3` reconnect MAC and prepare `b0/02`.
@@ -72,7 +75,7 @@ The former delete callback only removed a host association. The updated callback
 
 Unclaimed device-only entries without user/finger metadata are refused. This protects Windows/device-only records from fprintd's automatic garbage collection. Unconditional clear-storage is not advertised. This can mean a full sensor fails enrollment rather than silently deleting an unclaimed record.
 
-**Deletion is validated by simulation, not by a live KDE deletion in this session.** The successful new enrollment did not delete any existing finger. When deliberately deleting the last identity-bearing template, subsequent native enrollment cannot recreate the empty-store identity; initial provisioning remains unresolved.
+**Later live validation:** a selected KDE deletion preserved the two unrelated sensor records and host references byte-for-byte. The remaining entries were then deleted; an independent zero-count check preceded successful native enrollment with a fresh local identity. Factory initialization remains untested; see the empty-store report above.
 
 ## 6. Build, Tests and Installation
 
@@ -93,7 +96,7 @@ Observed results:
 | Existing protocol/tool Python tests |40 passed |
 | Actual C crypto with independent Python ECDH/KDF/HMAC peer |8 passed |
 | Protected installer transactions |3 passed |
-| Actual C driver API simulations |19 passed |
+| Actual C driver API simulations |23 passed |
 | libfprint SSM/device test suites |2 suites passed |
 | Native build and old public API symbol preservation |Passed |
 | Hardware open/list and no-finger cancellation |Passed |
@@ -124,8 +127,8 @@ Reference backups are private and **not restored automatically**: restoring old 
 ## 7. Remaining Scope
 
 - Reboot/cold-start persistence, longer sleep cycles and further active-reader suspend validation. A short standby test with KDE open passed after the correction below.
-- Live targeted deletion/re-enrollment and broader error-recovery testing.
-- Empty-store identity provisioning.
+- Broader error-recovery testing; live targeted deletion and re-enrollment after full template deletion have passed.
+- Factory-new/factory-reset initialization. Empty template-store enrollment now works.
 - Other firmware and models.
 - Full certificate-chain/firmware attestation and complete match-token validation. Verified connection/reconnect MACs are not a claim of the entire Windows Hello security model.
 

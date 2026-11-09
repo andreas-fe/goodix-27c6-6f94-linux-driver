@@ -21,9 +21,11 @@ command = ["cc", "-g", "-Wno-deprecated-declarations",
            "-Wl,-rpath,"+str(args.build/"libfprint"), "-Wl,--start-group",
            str(args.build/"libfprint/libfprint-private.a"),
            str(args.build/"libfprint/libnbis.a"),
-           str(args.build/"libfprint/sigfm/libsigfm.a"),
            str(args.build/"libfprint/libfprint-2.so.2.0.0"),
            *flags, "-lm", "-Wl,--end-group"]
+optional_archive = args.build / "libfprint/sigfm/libsigfm.a"
+if optional_archive.exists():
+    command.insert(command.index("-lm"), str(optional_archive))
 subprocess.run(command, check=True)
 result = subprocess.run([str(output)], text=True, capture_output=True)
 if result.returncode:

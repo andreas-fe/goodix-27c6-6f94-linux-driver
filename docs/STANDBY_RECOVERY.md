@@ -1,5 +1,8 @@
 # Goodix GF3268 — Standby Recovery Correction (2026-11-09)
 
+> **Latest result — 2026-11-09:** Every sensor template was deliberately deleted, an independent read confirmed zero records, and KDE enrolled a new first finger using a freshly generated local identity. Standard verification and practical unlock passed. This supersedes the earlier existing-record prerequisite. Factory-new/factory-reset provisioning remains untested. See [the empty-store report](EMPTY_STORE_ENROLLMENT.md), [reproducible build guide](BUILD_AND_INSTALL.md) and [maintenance guide](MAINTENANCE.md).
+
+
 **✅ The reported “already open” failure was diagnosed, corrected and retested with KDE open across a real standby cycle.** The first wake/setup request timed out again in the repeated test; the new bounded retry recovered, standard verification worked and the device closed normally. No service restart or USB reset was needed after that wake.
 
 ---
@@ -88,3 +91,7 @@ The repeated timeout is useful evidence: this was not merely a run in which the 
 - Cold boot and first-time provisioning of an empty sensor remain separate unverified areas.
 
 The driver and tests are in `driver/` and `tests/native_goodixsdcp.c`. Build/test/install instructions and protected-library rollback are in [Native Driver Integration](NATIVE_DRIVER_INTEGRATION.md). Rollback of a library does not remove sensor templates or automatically restore old host references.
+
+## Later user-reported follow-up
+
+The user subsequently confirmed a complete reboot and a longer standby/wake/unlock. These reports occurred before the final empty-store/new-local-identity test. The new first finger then passed standard verification and practical unlock, but a reboot/long standby specifically after that new identity has not been separately reported. No exact duration or independent timing is attributed to the later user-only report.

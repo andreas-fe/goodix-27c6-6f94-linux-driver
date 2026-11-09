@@ -2,6 +2,18 @@
 
 Latest changes first. Details can be found in `HANDOVER_COWORK.md` (section numbers).
 
+## 2026-11-09 — Empty template-store enrollment, reproducible build and local packaging
+
+**Hardware result:** KDE targeted deletion removed exactly the chosen record while preserving both others byte-for-byte. The user then deleted the remaining entries; independent sensor/host checks confirmed zero. Native KDE enrollment generated a fresh local identity without any old record/SID, completed thirteen captures/one commit/readback, and standard thumb verification plus practical unlock passed. This supports an emptied previously provisioned sensor, not an untested factory-reset state.
+
+**Precheck fix:** The first attempt failed before native capture because empty-store A5 returned03 and a retry was incorrectly supplied to identify completion. A freshly read empty list now completes identify with no match and no touch/A5. Retry errors stay in the report callback, avoiding conversion to a general completion error. Two actual-API regressions cover both paths. Empty-store support is now normal behavior without a trial build flag.
+
+**Reproduction:** Added pinned upstream1.94.10 integration and safe private C transport-key configuration helpers, a complete build/install guide, empty-store evidence and maintenance/package instructions. A fresh official upstream tree independently built and passed23 driver simulations and both libfprint suites. Public Python suite:55 tests. No working keys, reference snapshots or binary packages are exported.
+
+**Local installation:** A private pacman provider package now owns the tested library and preserves distribution companion files. Normal same-name distro updates no longer overwrite an unmanaged library modification; future fixes/dependency changes still require maintaining the local provider. This is not a fake high upstream version or a global updates freeze. User-reported reboot and longer standby/unlock passed before the final new-local-identity phase; practical unlock after that phase also passed.
+
+Details: [empty-store report](docs/EMPTY_STORE_ENROLLMENT.md), [reproducible build](docs/BUILD_AND_INSTALL.md), [maintenance](docs/MAINTENANCE.md), HANDOVER Sections65–67. Earlier entries below retain their chronological validation boundaries.
+
 ## 2026-11-09 — Standby setup recovery and failed-open cleanup
 
 **Problem:** With the KDE fingerprint dialog open across standby, the initial post-wake setup request timed out. The failed initialization leaked the GUsb handle/interface, so later claims returned “Device 27c6:6f94 is already open”.

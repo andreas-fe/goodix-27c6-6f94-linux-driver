@@ -6,7 +6,8 @@
  * Match-on-chip verify driver for the Goodix GF3268 (VID 27c6 PID 6f94), the
  * SDCP / Windows-Hello sensor found e.g. in the Honor MagicBook Art 14.
  * Native enrollment uses a fresh SDCP session and the verified thirteen-sample
- * policy for firmware 01010032. Existing Type-4 identity metadata is required:
+ * policy for firmware 01010032. Empty template stores get a fresh local identity;
+ * nonempty stores reuse their Type-4 metadata. Factory provisioning is untested:
  *   - list     -> read the on-chip template records (a6 READ_OTP)
  *   - enroll   -> capture, duplicate check, single SDCP commit, readback
  *   - verify   -> a5 SDCP match against the on-chip templates

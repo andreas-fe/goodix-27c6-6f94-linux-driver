@@ -4,6 +4,8 @@ A native `goodixsdcp` driver for **libfprint**, with native new-finger enrollmen
 
 The driver integrates seamlessly into **fprintd** for system-wide authentication across Linux desktop environments (KDE Settings, GNOME Settings, Lock Screen, Display Manager Login, `sudo`, `pam_fprintd`).
 
+> **Current full workflow:** Native KDE enrollment also works after every template was deleted and zero storage independently confirmed. Targeted deletion, fresh local identity, matching and practical unlock were validated. [Full empty-store evidence](docs/EMPTY_STORE_ENROLLMENT.md) · [Reproducible build](docs/BUILD_AND_INSTALL.md) · [Updates/recovery](docs/MAINTENANCE.md).
+
 ---
 
 ## 📊 Current Status & Feature Matrix
@@ -14,9 +16,10 @@ The driver integrates seamlessly into **fprintd** for system-wide authentication
 | Enroll NEW Finger    | ✅ Tested | Native C SDCP capture → Type-4 commit → `FpPrint`; firmware `01010032` |
 | List / Delete        | ✅ / See scope | `a6` list; targeted `a7/02` deletion with preservation checks (deletion simulated, GUI deletion not yet hardware-tested) |
 | Desktop & PAM        | ✅     | Lock Screen, `sudo`, Login, GUI Enrollment        |
-| Empty-Store Provisioning | ⏳ Open | Existing valid Type-4 identity still required |
+| First finger after full template deletion | ✅ Tested | Zero records confirmed; fresh local identity; native KDE enrollment + verification |
+| Factory-new/factory-reset provisioning | ⏳ Open | Not equivalent to deleting fingerprint templates |
 
-> **Native enrollment update — 2026-11-09:** A new finger was enrolled directly in **KDE System Settings** using the installed C driver, then accepted by `fprintd-verify`. The original right thumb still verified. No Python capture or separate host bind is needed for new enrollment. Existing Type-4 identity metadata is still required. Empty-store provisioning and reboot/cold-start validation remain open. See the [enrollment guide](docs/NATIVE_ENROLLMENT.md), [native integration details](docs/NATIVE_DRIVER_INTEGRATION.md) and [hardware report](docs/HARDWARE_TEST_REPORT_2026-11.md).
+> **Native enrollment update — 2026-11-09:** A new finger was enrolled directly in **KDE System Settings** using the installed C driver, then accepted by `fprintd-verify`. The original right thumb still verified. No Python capture or separate host bind is needed for new enrollment. The later empty-store test removed that prerequisite: the driver can create a fresh local identity. Reboot and longer standby were user-confirmed on the preceding state; factory provisioning remains open. See the [enrollment guide](docs/NATIVE_ENROLLMENT.md), [native integration details](docs/NATIVE_DRIVER_INTEGRATION.md) and [hardware report](docs/HARDWARE_TEST_REPORT_2026-11.md).
 
 > **Standby correction — 2026-11-09:** A real resume with the KDE dialog open exposed an initial setup timeout followed by a leaked USB handle (“already open”). The driver now retries only the initial setup request within a fixed budget and fully releases failed opens. The repeated standby test recovered from the same timeout, and standard thumb verification succeeded without a service restart. See the [standby recovery report](docs/STANDBY_RECOVERY.md). Longer sleep cycles still need broader testing.
 
@@ -24,7 +27,7 @@ The driver integrates seamlessly into **fprintd** for system-wide authentication
 
 ## 🆕 Enrolling Additional New Fingers Under Linux
 
-**Hardware-validated on GF3268 firmware `01010032` (2026-11-09).** No Windows session or TPM operation was needed for the additional finger; the existing on-chip identity metadata was reused.
+**Hardware-validated on GF3268 firmware `01010032` (2026-11-09).** No Windows session or TPM operation was needed. The driver reuses identity metadata for nonempty stores and creates a fresh local identifier after full template deletion.
 
 Use **KDE System Settings → Users → Fingerprint** with the newly built/installed driver. Select an unused finger slot and follow the prompts, lifting and repositioning the finger between captures. The driver accepts thirteen updates; fprintd adds one duplicate precheck, so the standard interface reports fourteen stages.
 
@@ -39,7 +42,7 @@ fprintd-list "$USER"
 
 The public C source retains redacted static transport keys. Configure those locally before building; exporting the Python key variables does not configure C. See the [key setup](docs/NATIVE_ENROLLMENT.md#public-transport-key-setup-required-for-sdcp) and installation instructions below. The Python tools remain available for protocol research; the standard desktop workflow does not invoke them.
 
-**Hardware validation:** KDE completed all thirteen native captures and enrollment; the new finger and original thumb both returned `verify-match`. **51 Python tests and 19 native driver simulations pass.** The native lifecycle simulations use the actual libfprint API with fake USB responses; they are distinct from the hardware test. No empty-store or cold-boot success is claimed.
+**Hardware validation:** KDE completed all thirteen native captures and enrollment; the new finger and original thumb both returned `verify-match`. **55 Python tests and 23 native driver simulations pass.** The native lifecycle simulations use the actual libfprint API with fake USB responses; they are distinct from the hardware test. First enrollment after full deletion is now hardware-confirmed; factory initialization remains untested.
 
 ---
 
@@ -77,6 +80,8 @@ The public C source retains redacted static transport keys. Configure those loca
 ---
 
 ## 🛠️ Building & Installing the Driver
+
+**Start with the [checked clean-source build guide](docs/BUILD_AND_INSTALL.md).** It provides a pinned upstream1.94.10 recipe, automatic Meson integration, private key configuration, tests and installation choices. The [maintenance guide](docs/MAINTENANCE.md) covers the tested local pacman provider package and update recovery. The manual notes below describe the earlier local-tree integration and are retained for reference.
 
 The driver is designed to be integrated into an existing `libfprint` source tree. Configure its private transport-key constants locally first. This implementation uses OpenSSL 3 APIs; install the corresponding development dependencies. No ready-to-use private-key binary is published.
 
@@ -156,7 +161,7 @@ Configure PAM via `/etc/pam.d/` (`auth sufficient pam_fprintd.so`) or enroll fin
 
 ## 🔬 Protocol & Reverse Engineering Highlights
 
-The full reverse-engineering journey is documented chronologically in `HANDOVER_COWORK.md` (Sections 1–63; the latest protocol corrections and integration are in Sections 55–63):
+The full reverse-engineering journey is documented chronologically in `HANDOVER_COWORK.md` (Sections 1–67; the latest protocol corrections and integration are in Sections 55–67):
 
 1. **Transport Encryption:** Custom GTLS framing layer (`MAC (32B) + Header (01 FF) + Length (4B) + IV (16B) + Ciphertext`). Uses AES-128-CBC and HMAC-SHA256. Verified 159/159 against captured USB traffic.
 2. **SDCP Handshake:** ECDH (P-256) + SP 800-108 Counter-Mode KDF (SHA-256). Reconstructed via disassembly of `GoodixMocSensorAdapter.dll` and live execution (`sdcp_capture.py`, `sdcp_session.py`).
@@ -169,4 +174,4 @@ The full reverse-engineering journey is documented chronologically in `HANDOVER_
 - **fprintd vs Python Tools:** Standalone tools require exclusive access to the USB interface. Finish other fingerprint operations first. If fprintd owns the interface, stop it before standalone testing and restore it afterward; the new tools do not manage services automatically. Do not stop the only working authentication path without retaining password access.
 - **Private enrollment references:** `experiments/private/` is ignored by Git. Before/commit/after files contain sensitive identifiers and identity metadata; do not publish them. They are not raw fingerprint images.
 - **Experimental scope:** Additional enrollment is tested on firmware `01010032` with an existing Type-4 record. The native enrollment path checks server key confirmation and reconnect MACs, but does not implement the complete Windows attestation/credential-release model.
-- **System Updates:** Upgrading your distribution's `libfprint` package will overwrite `/usr/lib/libfprint-2.so`. Simply rebuild and re-install (Step 5) after system upgrades, or add `libfprint` to `IgnorePkg` in `/etc/pacman.conf`.
+- **System Updates:** Manual library replacement can be overwritten by distribution updates. Prefer the documented local provider package; maintain/rebuild it for relevant fixes and dependency changes. A version string inside the library is not package-manager protection. See [Maintenance](docs/MAINTENANCE.md).

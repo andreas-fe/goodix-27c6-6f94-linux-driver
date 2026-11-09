@@ -1,12 +1,15 @@
 # Goodix GF3268 — Native Linux Enrollment (Hardware-Validated)
 
+> **Latest result — 2026-11-09:** Every sensor template was deliberately deleted, an independent read confirmed zero records, and KDE enrolled a new first finger using a freshly generated local identity. Standard verification and practical unlock passed. This supersedes the earlier existing-record prerequisite. Factory-new/factory-reset provisioning remains untested. See [the empty-store report](EMPTY_STORE_ENROLLMENT.md), [reproducible build guide](BUILD_AND_INSTALL.md) and [maintenance guide](MAINTENANCE.md).
+
+
 **Status: ✅ Additional new fingers can be enrolled directly through KDE/fprintd with the native C driver on the tested GF3268 firmware.**
 
 The later native integration on **2026-11-09** completed a new KDE enrollment and standard `fprintd-verify` successfully. It supersedes the Python-capture / C-bind workflow below. See [Native Driver Integration](NATIVE_DRIVER_INTEGRATION.md) for the implementation, validation and rollback details.
 
 On **2026-11-09**, a right little finger that had never been registered in Windows Hello or Linux was captured, committed to the sensor, matched after fresh SDCP connections, bound to the Linux user, and successfully verified through **fprintd**. The original right thumb remained functional. An unregistered right ring finger was rejected.
 
-This supersedes the previous conclusion that every new fingerprint enrollment is blocked by the Windows TPM. The successful experiment reused the identity metadata of an existing on-chip Type-4 record. **First-time provisioning of an empty sensor is still unresolved.**
+This supersedes the previous conclusion that every new fingerprint enrollment is blocked by the Windows TPM. The successful experiment reused the identity metadata of an existing on-chip Type-4 record. **That earlier prerequisite is superseded by the later empty-template-store result above; factory provisioning remains untested.**
 
 ---
 
@@ -25,8 +28,9 @@ This supersedes the previous conclusion that every new fingerprint enrollment is
 | Reject an unregistered control finger | ✅ | Right ring finger returned no match |
 | Bind the new template to Linux | ✅ | `fprintd-enroll` completed |
 | Verify the new finger through fprintd | ✅ | `verify-match` |
-| Cold boot / reboot persistence | ⏳ | Not tested in this session |
-| First enrollment on an empty sensor | ❌ / Open | Not implemented or demonstrated |
+| Reboot / longer standby | ✅ User reported | Passed before the later new-local-identity test; not separately repeated after it |
+| First enrollment after deleting every template | ✅ | Independently measured zero, new local identity, KDE success and verify-match |
+| Factory-new/factory-reset provisioning | ⏳ Open | Not the state tested here |
 | Direct new capture inside the C driver | ✅ | KDE completed thirteen native captures, commit and readback |
 | New native fingerprint through standard verification | ✅ | `fprintd-verify -f right-index-finger` → `verify-match` |
 | Existing fingerprint after native integration | ✅ | Original right thumb → `verify-match` |
@@ -58,7 +62,7 @@ fprintd-enroll -f right-index-finger
 fprintd-verify -f right-index-finger
 ```
 
-Choose the intended account and a free finger slot. KDE and fprintd use the same native driver. No external capture client, bind script, TPM call or Windows session is part of additional enrollment. Existing Type-4 identity metadata is still necessary. Existing host references retain their representation and do not need conversion.
+Choose the intended account and a free finger slot. KDE and fprintd use the same native driver. No external capture client, bind script, TPM call or Windows session is part of additional enrollment. Nonempty stores reuse Type-4 metadata; empty template stores generate a new local identifier. Existing host references retain their representation and do not need conversion.
 
 The driver reports thirteen enrollment stages; fprintd exposes fourteen including its precheck. Low-quality or overlapping placements retry without advancing. Lift the finger completely between samples and vary its position.
 
@@ -313,15 +317,15 @@ Older sections of `HANDOVER_COWORK.md` are retained as history. The November cor
 python3 -m unittest discover -s tests -q
 ```
 
-**51 Python tests pass in the public package** (40 protocol/tool checks, eight actual C crypto tests and three protected-installer tests). Nineteen additional native driver simulations run through the actual libfprint API using fake USB responses. The tests cover: metadata transport, CRC integrity, ACKs, fragmentation, resource cleanup, command boundaries, actual ECDH-derived server MACs, bad-MAC rejection, reconnect verification, the 13-update trace policy, private references, lost commit replies, cleanup failures and target-record resolution.
+**51 Python tests pass in the public package** (40 protocol/tool checks, eight actual C crypto tests and three protected-installer tests). Twenty-three additional native driver simulations run through the actual libfprint API using fake USB responses. The tests cover: metadata transport, CRC integrity, ACKs, fragmentation, resource cleanup, command boundaries, actual ECDH-derived server MACs, bad-MAC rejection, reconnect verification, the 13-update trace policy, private references, lost commit replies, cleanup failures and target-record resolution.
 
 The isolated regular-driver investigation is included as `goodixmoc-6f94-safe.patch` and `goodixmoc_trial.c`. The patch targets the project's local libfprint-1.94.5 baseline and is a diagnostic artifact, not an upstream-ready or version-independent patch. It disables configuration writes, deletion and automatic resets for the tested device. Its Type-1 commit did not solve enrollment.
 
 Remaining work:
 
 1. Reboot/cold-start validation, longer sleep cycles and recognition-rate measurements. A short standby reproduction with KDE open now passed after the [open-recovery correction](STANDBY_RECOVERY.md).
-2. First-time provisioning with an empty template store.
-3. Live GUI deletion/re-enrollment and broader suspend/failure-recovery validation (targeted deletion is currently simulation-tested).
+2. Factory-new/factory-reset provisioning; empty template storage on the provisioned device now works.
+3. Broader failure/recovery and recognition testing. Targeted GUI deletion and empty-store re-enrollment are now hardware-tested.
 4. Expand model/firmware coverage only after device-specific validation.
 5. Complete certificate-chain/firmware attestation and full match-token verification before claiming the experimental client provides the entire Windows SDCP security model.
 
