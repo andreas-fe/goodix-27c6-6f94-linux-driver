@@ -2,9 +2,11 @@
 
 > ## ✅ CURRENT HARDWARE-VALIDATED STATE — 2026-11-09
 > **Additional new fingerprints can now be captured and committed under Linux.**
-> See **Sections 55–63**, [Native Linux Enrollment](docs/NATIVE_ENROLLMENT.md) and the [Hardware Test Report](docs/HARDWARE_TEST_REPORT_2026-11.md).
+> See **Sections 55–64**, [Native Linux Enrollment](docs/NATIVE_ENROLLMENT.md) and the [Hardware Test Report](docs/HARDWARE_TEST_REPORT_2026-11.md).
 > The old TPM-only conclusion, `a7` identity-registration interpretation, `a0=000000` “no frame” interpretation and `74` completion heuristic are superseded.
 > **Native C integration is now hardware-validated through KDE.** New capture/commit runs inside libfprint; separate Python capture and host bind are no longer required. New-finger and original-thumb standard verification passed. Empty-store provisioning, cold-start validation and live GUI deletion remain open. Sections 55–60 retain the preceding Python experiment chronology.
+
+> **Standby follow-up:** A failed initial wake request could leak GUsb and block later claims. Failed-open cleanup and bounded setup retry are now installed and hardware-tested with KDE open across a short sleep. The original timeout recurred and recovered; post-wake standard thumb verification passed. See Section 64 and the [standby report](docs/STANDBY_RECOVERY.md). Longer corrected sleep remains untested.
 
 > ## ⚠️ ATTENTION: Sections 1–9 of this document are HISTORICAL / REFUTED
 > They describe a TLS-PSK handshake using `openssl s_client` as a proxy.
@@ -2781,3 +2783,20 @@ The native build was installed system-wide after operating-system administrator 
 **Public export:** Actual C implementation and tests are included. AES/HMAC constants remain intentionally redacted; no working-key binaries, sensor snapshots, real SIDs/account IDs/enrollment IDs or vendor DLLs are published. The optional protected installer expects a locally built library and is specific to the documented Arch/CachyOS paths. Distribution upgrades can replace the custom library.
 
 This section supersedes the “native C integration remains open” limitation in historical Section 60. Additional enrollment is now demonstrated through the operating-system standard UI and API. Initial provisioning remains a separate research question.
+
+
+---
+
+# 64. Standby failure: initial setup timeout → leaked GUsb handle (2026-11-09)
+
+After the native enrollment validation, the user left the KDE fingerprint dialog open and put the notebook into standby for approximately 38 minutes. Resume was followed by a timeout of the first `e1/04` setup receive. The driver reported initialization failure without releasing interface 0 or closing GUsb. In the inspected libfprint 1.94.5 baseline, failed open completion does not close the framework-opened USB handle, so later claims failed before entering the driver with “Device 27c6:6f94 is already open”. This was not evidence that templates had been lost.
+
+Stopping the blocked daemon released the handle. Isolated open/list/close then succeeded without a reset and showed three templates. The driver was corrected to unwind claimed-interface and GUsb ownership on every open failure, including a failed claim, and to reset local suspend/open state. Only the first idempotent setup request is retried on a timeout, at most twice with 300 ms spacing. No USB reset, MCU configuration write or capture/commit retry was added.
+
+Five new actual USB-type FpDevice tests with link-time GUsb fakes require balanced open/close and claim/release ownership and same-object reopening after failure. They cover a recovered initial timeout, bounded exhausted timeouts, disconnect, malformed list and failed claim. A sixth regression exercises an active identify's pause through the real receive callback and complete session refresh on resume. Total native simulations: 19; public Python tests: 51. The libfprint SSM/device suites and native build also passed.
+
+The corrected library was installed with a private previous-library/reference backup. Two normal service claim/list/release cycles passed. The user then repeated standby with KDE open. In this approximately 5-second sleep cycle the first setup timed out again; retry 1/2 succeeded, initialization completed, standard matching returned `verify-match`, and normal close completed under the same daemon process. The user saw no KDE error. A separate standard `fprintd-verify -f right-thumb` then also returned `verify-match`; all three host entries remained listed. No service restart or USB reset was needed after wake.
+
+This is direct validation of the new recovery branch under the reproduced initial-timeout condition. It is not a long-sleep reliability study: a corrected sleep matching the original 38-minute duration, additional pending-authentication hardware scenarios and cold boot remain open. New enrollment and deletion were not repeated after this standby; their earlier validation boundaries still apply.
+
+Detailed sanitized timestamps, behavior and test boundaries: [Standby Recovery](docs/STANDBY_RECOVERY.md).

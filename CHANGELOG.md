@@ -2,6 +2,16 @@
 
 Latest changes first. Details can be found in `HANDOVER_COWORK.md` (section numbers).
 
+## 2026-11-09 — Standby setup recovery and failed-open cleanup
+
+**Problem:** With the KDE fingerprint dialog open across standby, the initial post-wake setup request timed out. The failed initialization leaked the GUsb handle/interface, so later claims returned “Device 27c6:6f94 is already open”.
+
+**Fix:** Fully release failed opens and failed claims; clear local open/suspend state. Retry only an initial `e1/04` timeout, at most twice, without USB reset or capture/commit retries. Five USB-type actual-API regressions require balanced ownership and successful same-object reopening; an additional test checks active identify pause/session refresh across suspend/resume.
+
+**Hardware:** The repeated short standby with KDE open hit the same first-request timeout. The new retry recovered, standard matching and close succeeded, and a separate original-thumb `fprintd-verify` passed. All three entries remain registered; no service restart was needed after wake.51 Python tests and 19 native simulations pass. A long corrected sleep matching the original approximately 38-minute failure remains untested.
+
+Details: [Standby recovery report](docs/STANDBY_RECOVERY.md), HANDOVER Section 64.
+
 ## 2026-11-09 — Native C enrollment through KDE confirmed
 
 **Result:** A new finger was enrolled directly in KDE using the updated system-wide `goodixsdcp` C driver. All thirteen native capture stages and commit/readback completed; standard fprintd verification accepted the new entry and the original right thumb. The previous two entries remain registered. Python capture and separate host bind are no longer needed for new fingerprints.

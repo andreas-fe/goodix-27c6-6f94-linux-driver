@@ -18,6 +18,8 @@ The driver integrates seamlessly into **fprintd** for system-wide authentication
 
 > **Native enrollment update — 2026-11-09:** A new finger was enrolled directly in **KDE System Settings** using the installed C driver, then accepted by `fprintd-verify`. The original right thumb still verified. No Python capture or separate host bind is needed for new enrollment. Existing Type-4 identity metadata is still required. Empty-store provisioning and reboot/cold-start validation remain open. See the [enrollment guide](docs/NATIVE_ENROLLMENT.md), [native integration details](docs/NATIVE_DRIVER_INTEGRATION.md) and [hardware report](docs/HARDWARE_TEST_REPORT_2026-11.md).
 
+> **Standby correction — 2026-11-09:** A real resume with the KDE dialog open exposed an initial setup timeout followed by a leaked USB handle (“already open”). The driver now retries only the initial setup request within a fixed budget and fully releases failed opens. The repeated standby test recovered from the same timeout, and standard thumb verification succeeded without a service restart. See the [standby recovery report](docs/STANDBY_RECOVERY.md). Longer sleep cycles still need broader testing.
+
 ---
 
 ## 🆕 Enrolling Additional New Fingers Under Linux
@@ -37,7 +39,7 @@ fprintd-list "$USER"
 
 The public C source retains redacted static transport keys. Configure those locally before building; exporting the Python key variables does not configure C. See the [key setup](docs/NATIVE_ENROLLMENT.md#public-transport-key-setup-required-for-sdcp) and installation instructions below. The Python tools remain available for protocol research; the standard desktop workflow does not invoke them.
 
-**Hardware validation:** KDE completed all thirteen native captures and enrollment; the new finger and original thumb both returned `verify-match`. **51 Python tests and 13 native driver simulations pass.** The native lifecycle simulations use the actual libfprint API with fake USB responses; they are distinct from the hardware test. No empty-store or cold-boot success is claimed.
+**Hardware validation:** KDE completed all thirteen native captures and enrollment; the new finger and original thumb both returned `verify-match`. **51 Python tests and 19 native driver simulations pass.** The native lifecycle simulations use the actual libfprint API with fake USB responses; they are distinct from the hardware test. No empty-store or cold-boot success is claimed.
 
 ---
 

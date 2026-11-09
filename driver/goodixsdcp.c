@@ -76,6 +76,8 @@ struct _FpiDeviceGoodixSdcp
   /* Set on resume: the next verify/enroll re-runs the SDCP handshake before
    * arming, because a deep suspend can drop the sensor's transport session. */
   gboolean        need_reinit;
+  gboolean        interface_claimed;
+  guint           open_retries;
   GsdcpSession    session;
   guint8          enroll_hello[162];
   guint8          enroll_nonce[32];
@@ -391,6 +393,19 @@ init_step_cb (FpiDeviceGoodixSdcp *self, const guint8 *data, gsize len, GError *
 {
   if (error)
     {
+      /* The first idempotent wake/setup request can time out immediately after
+       * system resume. Retry only this request, with a finite budget. Never
+       * retry capture/commit or reset the device as an open-recovery action. */
+      if (fpi_device_get_current_action (FP_DEVICE (self)) == FPI_DEVICE_ACTION_OPEN &&
+          fpi_ssm_get_cur_state (self->task_ssm) == GSDCP_INIT_POV &&
+          g_error_matches (error, G_USB_DEVICE_ERROR, G_USB_DEVICE_ERROR_TIMED_OUT) &&
+          self->open_retries++ < 2)
+        {
+          fp_dbg ("goodixsdcp: initial setup timed out; retry %u/2", self->open_retries);
+          g_clear_error (&error);
+          fpi_ssm_jump_to_state_delayed (self->task_ssm, GSDCP_INIT_POV, 300);
+          return;
+        }
       fp_dbg ("goodixsdcp: handshake step FAILED: %s", error->message);
       fpi_ssm_mark_failed (self->task_ssm, error);
       return;
@@ -460,12 +475,34 @@ init_run_state (FpiSsm *ssm, FpDevice *dev)
 }
 
 static void
-init_ssm_done (FpiSsm *ssm, FpDevice *dev, GError *error)
+open_complete (FpDevice *dev, GError *error)
 {
   FpiDeviceGoodixSdcp *self = FPI_DEVICE_GOODIXSDCP (dev);
 
+  /* libfprint opens GUsb before invoking dev_open, but this baseline does not
+   * close it when driver initialization fails. Unwind both ownership levels
+   * here, otherwise every later claim fails with GUsb's "already open". */
+  if (error)
+    {
+      GUsbDevice *usb = fpi_device_get_usb_device (dev);
+      if (self->interface_claimed)
+        {
+          g_usb_device_release_interface (usb, USB_INTERFACE, 0, NULL);
+          self->interface_claimed = FALSE;
+        }
+      g_usb_device_close (usb, NULL);
+      self->suspended = FALSE;
+      self->need_reinit = FALSE;
+      g_clear_object (&self->cancel);
+    }
   self->task_ssm = NULL;
   fpi_device_open_complete (dev, error);
+}
+
+static void
+init_ssm_done (FpiSsm *ssm, FpDevice *dev, GError *error)
+{
+  open_complete (dev, error);
 }
 
 static void
@@ -477,13 +514,17 @@ dev_open (FpDevice *device)
 
   fp_dbg ("goodixsdcp: dev_open (claim iface %d)", USB_INTERFACE);
 
+  self->suspended = FALSE;
+  self->need_reinit = FALSE;
+  self->open_retries = 0;
   if (!g_usb_device_claim_interface (usb, USB_INTERFACE, 0, &error))
     {
       fp_dbg ("goodixsdcp: dev_open claim FAILED: %s",
               error ? error->message : "?");
-      fpi_device_open_complete (device, error);
+      open_complete (device, error);
       return;
     }
+  self->interface_claimed = TRUE;
   self->seq = 0;
   self->task_ssm = fpi_ssm_new (device, init_run_state, GSDCP_INIT_NUM_STATES);
   fpi_ssm_start (self->task_ssm, init_ssm_done);
@@ -498,6 +539,7 @@ close_cleanup_cb (FpiDeviceGoodixSdcp *self, const guint8 *data, gsize len, GErr
   if (!error && (!len || data[0] != 0))
     error = fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO, "Cannot disable fingerprint power-button shield");
   g_usb_device_release_interface (usb, USB_INTERFACE, 0, &release_error);
+  self->interface_claimed = FALSE;
   if (!error)
     error = release_error;
   else
@@ -1253,7 +1295,7 @@ dev_cancel (FpDevice *device)
 }
 
 /* System is about to suspend. If we are inside a cancellable finger read
- * (verify/identify/enroll waiting for a finger), pause it cleanly by cancelling
+ * (verify/identify waiting for a finger), pause it cleanly by cancelling
  * the read: cmd_receive_cb then completes the suspend with a NULL error (so
  * libfprint keeps the action alive across the sleep) and quietly finishes the
  * command, leaving the task SSM parked. In any other situation we cannot pause,

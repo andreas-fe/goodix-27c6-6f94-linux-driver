@@ -257,3 +257,18 @@ The installed local library matched the reviewed candidate checksum. Public sour
 No reboot/cold-start, live GUI deletion, fresh suspend test or empty-store provisioning was completed as part of this native validation. Deletion has targeted simulation coverage. Full certificate-chain/firmware attestation and match-token verification remain open.
 
 Implementation details and local installation/rollback procedure: [Native Driver Integration](NATIVE_DRIVER_INTEGRATION.md).
+
+
+---
+
+## 10. Standby Failure and Corrected Hardware Recovery
+
+The user later reported “Device 27c6:6f94 is already open” after a standby entered with the KDE fingerprint dialog open. The initial setup request had timed out; the old driver left the framework-opened USB handle claimed/open on initialization failure. Later claims were therefore blocked. The three templates were still present.
+
+The corrected driver fully releases failed opens/claims and retries only an initial setup timeout within a two-retry budget. The added actual USB-type API tests prove same-object reopen after several failure modes, and an active identify simulation checks pause/resume session refresh. Public tests now comprise 51 Python checks and 19 native simulations.
+
+After installation, the user repeated standby with KDE open. The first setup request timed out again, the new retry succeeded, and standard matching/close completed without a post-wake daemon restart. The user saw no error. A separate `fprintd-verify -f right-thumb` returned `verify-match` afterward; all three registered slots were still listed.
+
+The corrected observed sleep lasted about 5 seconds, compared with approximately 38 minutes for the original failing sleep. Longer corrected cycles, broader active-authentication hardware scenarios and cold boot remain open. This follow-up did not write or delete a sensor template.
+
+Full failure/recovery chronology and exact test scope: [Standby Recovery](STANDBY_RECOVERY.md).

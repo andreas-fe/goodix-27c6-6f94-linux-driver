@@ -21,12 +21,94 @@ static void fast_jump (FpiSsm *, gint, gint);
 
 typedef enum { SUCCESS, WAIT_RETRY, OVERLAP, BAD_RECONNECT, DUPLICATE,
                REJECT_COMMIT, LOST_COMMIT_REPLY, CHANGE_ORIGINAL,
-               CANCEL, WRONG_FIRMWARE, EMPTY_STORE } Scenario;
+               CANCEL, WRONG_FIRMWARE, EMPTY_STORE,
+               OPEN_WAKE_TIMEOUT, OPEN_ALL_TIMEOUT, OPEN_HANDSHAKE_ERROR,
+               OPEN_BAD_LIST, OPEN_CLAIM_ERROR } Scenario;
 static Scenario scenario;
 static GByteArray *store;
 static guint updates, commits, deletions, polls, progress_count, cleanup_count;
 static guint8 last_nonce[32];
 static GCancellable *test_cancel;
+static gboolean usb_open, usb_claimed;
+static guint usb_opens, usb_closes, usb_claims, usb_releases, wake_requests;
+static gboolean hold_next_arm;
+static FpiUsbTransfer *held_transfer;
+static gulong held_cancel_id;
+
+static gboolean
+finish_held_cancel (gpointer user_data)
+{
+  FpiDeviceGoodixSdcp *self = user_data;
+  FpiUsbTransfer *transfer = g_steal_pointer (&held_transfer);
+  g_cancellable_disconnect (self->cancel, held_cancel_id);
+  held_cancel_id = 0;
+  cmd_receive_cb (transfer, FP_DEVICE (self), fpi_ssm_get_data (transfer->ssm),
+                  g_error_new_literal (G_IO_ERROR, G_IO_ERROR_CANCELLED, "Paused read"));
+  fpi_usb_transfer_unref (transfer);
+  return G_SOURCE_REMOVE;
+}
+
+static void
+held_cancelled (GCancellable *cancel, gpointer user_data)
+{
+  g_idle_add (finish_held_cancel, user_data);
+}
+
+static void
+parked_command (FpiSsm *ssm, FpDevice *device)
+{
+  /* Synthetic outstanding USB read; completion uses the real receive callback. */
+}
+
+/* Link-time GUsb fakes also intercept libfprint's open/close ownership layer.
+ * This lets the real USB-type FpDevice API catch a leaked GUsb handle without
+ * accessing any hardware. The usual lifecycle tests below remain virtual. */
+gboolean
+g_usb_device_open (GUsbDevice *usb, GError **error)
+{
+  if (usb_open)
+    {
+      g_set_error_literal (error, G_USB_DEVICE_ERROR, G_USB_DEVICE_ERROR_ALREADY_OPEN, "Already open");
+      return FALSE;
+    }
+  usb_open = TRUE;
+  usb_opens++;
+  return TRUE;
+}
+
+gboolean
+g_usb_device_close (GUsbDevice *usb, GError **error)
+{
+  g_assert_true (usb_open);
+  usb_open = usb_claimed = FALSE;
+  usb_closes++;
+  return TRUE;
+}
+
+gboolean
+g_usb_device_claim_interface (GUsbDevice *usb, gint iface, GUsbDeviceClaimInterfaceFlags flags, GError **error)
+{
+  g_assert_true (usb_open);
+  g_assert_false (usb_claimed);
+  if (scenario == OPEN_CLAIM_ERROR)
+    {
+      g_set_error_literal (error, G_USB_DEVICE_ERROR, G_USB_DEVICE_ERROR_BUSY, "Claim busy");
+      return FALSE;
+    }
+  usb_claimed = TRUE;
+  usb_claims++;
+  return TRUE;
+}
+
+gboolean
+g_usb_device_release_interface (GUsbDevice *usb, gint iface, GUsbDeviceClaimInterfaceFlags flags, GError **error)
+{
+  g_assert_true (usb_open);
+  g_assert_true (usb_claimed);
+  usb_claimed = FALSE;
+  usb_releases++;
+  return TRUE;
+}
 
 static gboolean
 fake_start (GsdcpSession *session, guint8 *hello)
@@ -78,6 +160,20 @@ gsdcp_test_command (FpiDeviceGoodixSdcp *self, guint8 command, guint8 subcommand
   gsize reply_len = 1;
   GError *error = NULL;
   g_assert_cmpuint (command, !=, 0xc0); /* No configuration writes. */
+  if (command == 0xa2 && hold_next_arm)
+    {
+      hold_next_arm = FALSE;
+      CmdData *data = g_new0 (CmdData, 1);
+      data->callback = callback;
+      self->cmd_cancelable = TRUE;
+      self->cmd_ssm = fpi_ssm_new (FP_DEVICE (self), parked_command, GSDCP_CMD_NUM_STATES);
+      fpi_ssm_set_data (self->cmd_ssm, data, (GDestroyNotify) cmd_data_free);
+      fpi_ssm_start (self->cmd_ssm, cmd_ssm_done);
+      held_transfer = fpi_usb_transfer_new (FP_DEVICE (self));
+      held_transfer->ssm = self->cmd_ssm;
+      held_cancel_id = g_cancellable_connect (self->cancel, G_CALLBACK (held_cancelled), self, NULL);
+      return;
+    }
   switch (command)
     {
     case 0xd0:
@@ -88,6 +184,8 @@ gsdcp_test_command (FpiDeviceGoodixSdcp *self, guint8 command, guint8 subcommand
     case 0xa6:
       reply_len = store->len;
       memcpy (reply, store->data, reply_len);
+      if (scenario == OPEN_BAD_LIST)
+        reply[1] = 19; /* Count must match payload size. */
       break;
     case 0xe3:
       {
@@ -186,6 +284,12 @@ gsdcp_test_command (FpiDeviceGoodixSdcp *self, guint8 command, guint8 subcommand
         cleanup_count++;
       break;
     case 0xe1:
+      wake_requests++;
+      if (scenario == OPEN_ALL_TIMEOUT || (scenario == OPEN_WAKE_TIMEOUT && wake_requests == 1))
+        error = g_error_new_literal (G_USB_DEVICE_ERROR, G_USB_DEVICE_ERROR_TIMED_OUT, "Wake timeout");
+      else if (scenario == OPEN_HANDSHAKE_ERROR)
+        error = g_error_new_literal (G_USB_DEVICE_ERROR, G_USB_DEVICE_ERROR_NO_DEVICE, "Disconnected");
+      break;
     case 0xb0:
       break;
     default:
@@ -340,6 +444,106 @@ run_identify_no_match (void)
   g_byte_array_unref (store);
 }
 
+static void
+run_open_recovery (gconstpointer pointer)
+{
+  Scenario test = GPOINTER_TO_INT (pointer);
+  scenario = test;
+  usb_open = usb_claimed = FALSE;
+  usb_opens = usb_closes = usb_claims = usb_releases = wake_requests = 0;
+  updates = commits = deletions = polls = cleanup_count = 0;
+  store = g_byte_array_new ();
+  guint8 count[2] = { 0 };
+  g_byte_array_append (store, count, 2);
+  add_record (1);
+  FpDeviceClass *klass = g_type_class_ref (fpi_device_goodixsdcp_get_type ());
+  klass->type = FP_DEVICE_TYPE_USB;
+  klass->open = dev_open;
+  klass->close = dev_close;
+  g_autoptr(GUsbDevice) usb = g_object_new (G_USB_TYPE_DEVICE, NULL);
+  g_autoptr(FpDevice) device = g_object_new (fpi_device_goodixsdcp_get_type (), "fpi-usb-device", usb, NULL);
+  g_type_class_unref (klass);
+  g_autoptr(GError) error = NULL;
+  if (test == OPEN_WAKE_TIMEOUT)
+    {
+      g_assert_true (fp_device_open_sync (device, NULL, &error));
+      g_assert_no_error (error);
+      g_assert_cmpuint (wake_requests, ==, 2);
+      g_assert_true (fp_device_close_sync (device, NULL, &error));
+    }
+  else
+    {
+      g_assert_false (fp_device_open_sync (device, NULL, &error));
+      g_assert_nonnull (error);
+      g_assert_false (fp_device_is_open (device));
+      g_assert_false (usb_open);
+      g_assert_false (usb_claimed);
+      g_assert_cmpuint (usb_opens, ==, 1);
+      g_assert_cmpuint (usb_closes, ==, 1);
+      g_assert_cmpuint (usb_claims, ==, usb_releases);
+      g_assert_cmpuint (wake_requests, ==, test == OPEN_ALL_TIMEOUT ? 3 : test == OPEN_CLAIM_ERROR ? 0 : 1);
+      g_clear_error (&error);
+      /* Same FpDevice + same GUsb object: no daemon restart or device reset. */
+      scenario = SUCCESS;
+      g_assert_true (fp_device_open_sync (device, NULL, &error));
+      g_assert_no_error (error);
+      g_assert_true (fp_device_close_sync (device, NULL, &error));
+    }
+  g_assert_no_error (error);
+  g_assert_cmpuint (usb_opens, ==, usb_closes);
+  g_assert_cmpuint (usb_claims, ==, usb_releases);
+  g_assert_false (usb_open);
+  g_assert_false (usb_claimed);
+  g_assert_cmpuint (commits, ==, 0);
+  g_assert_cmpuint (deletions, ==, 0);
+  g_assert_cmpuint (updates, ==, 0);
+  g_assert_cmpuint (store->data[1], ==, 1);
+  g_byte_array_unref (store);
+}
+
+static void
+identify_finished (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+  GError *error = NULL;
+  g_assert_true (fp_device_identify_finish (FP_DEVICE (source), result, NULL, NULL, &error));
+  g_assert_no_error (error);
+  *(gboolean *) user_data = TRUE;
+}
+
+static void
+run_active_suspend (void)
+{
+  g_autoptr(FpDevice) device = setup_device (SUCCESS);
+  FpiDeviceGoodixSdcp *self = FPI_DEVICE_GOODIXSDCP (device);
+  g_autoptr(GPtrArray) gallery = g_ptr_array_new ();
+  g_autoptr(GError) error = NULL;
+  gboolean completed = FALSE;
+  wake_requests = 0;
+  hold_next_arm = TRUE;
+  fp_device_identify (device, gallery, NULL, NULL, NULL, NULL, identify_finished, &completed);
+  while (!held_transfer)
+    g_main_context_iteration (NULL, TRUE);
+  g_assert_true (fp_device_suspend_sync (device, NULL, &error));
+  g_assert_no_error (error);
+  g_assert_true (self->suspended);
+  g_assert_null (self->cmd_ssm);
+  g_assert_nonnull (self->task_ssm);
+  g_assert_false (completed);
+  g_assert_true (fp_device_resume_sync (device, NULL, &error));
+  g_assert_no_error (error);
+  while (!completed)
+    g_main_context_iteration (NULL, TRUE);
+  g_assert_false (self->suspended);
+  g_assert_null (self->task_ssm);
+  g_assert_cmpuint (wake_requests, ==, 1); /* Full session refresh on resume. */
+  g_assert_cmpuint (polls, ==, 1);
+  g_assert_cmpuint (commits, ==, 0);
+  g_assert_cmpuint (deletions, ==, 0);
+  g_assert_true (fp_device_close_sync (device, NULL, &error));
+  g_assert_no_error (error);
+  g_byte_array_unref (store);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -354,5 +558,13 @@ main (int argc, char **argv)
     }
   g_test_add_func ("/goodixsdcp/delete/only-requested-record", run_delete);
   g_test_add_func ("/goodixsdcp/identify/no-match-completes-enrollment-precheck", run_identify_no_match);
+  const gchar *open_names[] = { "wake-timeout-retries", "bounded-timeouts-then-reopen",
+                                "disconnect-then-reopen", "invalid-list-then-reopen", "claim-failure-then-reopen" };
+  for (guint i = 0; i < G_N_ELEMENTS (open_names); i++)
+    {
+      g_autofree gchar *path = g_strdup_printf ("/goodixsdcp/open/%s", open_names[i]);
+      g_test_add_data_func (path, GINT_TO_POINTER (OPEN_WAKE_TIMEOUT + i), run_open_recovery);
+    }
+  g_test_add_func ("/goodixsdcp/suspend/active-identify-refreshes-and-completes", run_active_suspend);
   return g_test_run ();
 }

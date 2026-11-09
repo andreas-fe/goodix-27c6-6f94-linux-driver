@@ -313,15 +313,15 @@ Older sections of `HANDOVER_COWORK.md` are retained as history. The November cor
 python3 -m unittest discover -s tests -q
 ```
 
-**51 Python tests pass in the public package** (40 protocol/tool checks, eight actual C crypto tests and three protected-installer tests). Thirteen additional native driver simulations run through the actual libfprint API using fake USB responses. The tests cover: metadata transport, CRC integrity, ACKs, fragmentation, resource cleanup, command boundaries, actual ECDH-derived server MACs, bad-MAC rejection, reconnect verification, the 13-update trace policy, private references, lost commit replies, cleanup failures and target-record resolution.
+**51 Python tests pass in the public package** (40 protocol/tool checks, eight actual C crypto tests and three protected-installer tests). Nineteen additional native driver simulations run through the actual libfprint API using fake USB responses. The tests cover: metadata transport, CRC integrity, ACKs, fragmentation, resource cleanup, command boundaries, actual ECDH-derived server MACs, bad-MAC rejection, reconnect verification, the 13-update trace policy, private references, lost commit replies, cleanup failures and target-record resolution.
 
 The isolated regular-driver investigation is included as `goodixmoc-6f94-safe.patch` and `goodixmoc_trial.c`. The patch targets the project's local libfprint-1.94.5 baseline and is a diagnostic artifact, not an upstream-ready or version-independent patch. It disables configuration writes, deletion and automatic resets for the tested device. Its Type-1 commit did not solve enrollment.
 
 Remaining work:
 
-1. Reboot/cold-start validation and longer-term recognition-rate measurements.
+1. Reboot/cold-start validation, longer sleep cycles and recognition-rate measurements. A short standby reproduction with KDE open now passed after the [open-recovery correction](STANDBY_RECOVERY.md).
 2. First-time provisioning with an empty template store.
-3. Live GUI deletion/re-enrollment and broader suspend/failure-recovery validation of the updated driver (targeted deletion is currently simulation-tested).
+3. Live GUI deletion/re-enrollment and broader suspend/failure-recovery validation (targeted deletion is currently simulation-tested).
 4. Expand model/firmware coverage only after device-specific validation.
 5. Complete certificate-chain/firmware attestation and full match-token verification before claiming the experimental client provides the entire Windows SDCP security model.
 

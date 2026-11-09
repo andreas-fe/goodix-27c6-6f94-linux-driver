@@ -58,7 +58,7 @@ The driver exposes 13 stages; fprintd adds its identify precheck, making 14 on D
 - Failure to confirm storage is an error; it is not a reason to clear or reset the sensor. A post-commit failure can leave an unbound sensor record; recovery beyond a successful readback remains an area for further live testing.
 - Packet reception checks CRC8/CRC32, assembles fragments and ignores ACKs. The old command SSM completes before its callback starts another command.
 - Normal close disables the shield and releases USB. There is no automatic USB reset or MCU configuration upload.
-- Verify/identify retain the suspend/resume path. Enrollment is cancelled across suspend instead of jumping into verify states. The updated native build has not had a fresh end-to-end suspend hardware test.
+- Verify/identify retain the suspend/resume path. Enrollment is cancelled across suspend instead of jumping into verify states. The later open-recovery correction passed a short real standby reproduction with KDE open and standard thumb verification; active-read pause/resume is also simulation-tested. Longer sleep cycles remain to be tested. See the [standby report](STANDBY_RECOVERY.md).
 
 ## 4. fprintd Precheck Correction
 
@@ -93,13 +93,13 @@ Observed results:
 | Existing protocol/tool Python tests |40 passed |
 | Actual C crypto with independent Python ECDH/KDF/HMAC peer |8 passed |
 | Protected installer transactions |3 passed |
-| Actual C driver API simulations |13 passed |
+| Actual C driver API simulations |19 passed |
 | libfprint SSM/device test suites |2 suites passed |
 | Native build and old public API symbol preservation |Passed |
 | Hardware open/list and no-finger cancellation |Passed |
 | KDE native enrollment + new-finger/old-thumb verification |Passed |
 
-The 13 driver simulations cover success, no-finger retry, overlap, bad reconnect, duplicate, rejected commit, lost commit reply, changed original, cancellation, wrong firmware, empty store, targeted deletion including refusal of unclaimed cleanup, and no-match precheck completion. Initial session acceptance/USB are simulated there; the separate eight crypto tests exercise actual C crypto against an independent synthetic peer.
+The initial 13 driver simulations cover success, no-finger retry, overlap, bad reconnect, duplicate, rejected commit, lost commit reply, changed original, cancellation, wrong firmware, empty store, targeted deletion including refusal of unclaimed cleanup, and no-match precheck completion. Initial session acceptance/USB are simulated there; the separate eight crypto tests exercise actual C crypto against an independent synthetic peer.
 
 The optional `scripts/install_native_driver.py` is specific to systems using `/usr/lib/libfprint-2.so.2.0.0`, systemd and `/var/lib/fprint` (the tested Arch/CachyOS layout). Inspect paths and ABI before use elsewhere. It requires administrator authentication, an explicit checksum and a **locally built** candidate:
 
@@ -123,10 +123,21 @@ Reference backups are private and **not restored automatically**: restoring old 
 
 ## 7. Remaining Scope
 
-- Reboot/cold-start persistence and a fresh suspend/resume validation of this build.
+- Reboot/cold-start persistence, longer sleep cycles and further active-reader suspend validation. A short standby test with KDE open passed after the correction below.
 - Live targeted deletion/re-enrollment and broader error-recovery testing.
 - Empty-store identity provisioning.
 - Other firmware and models.
 - Full certificate-chain/firmware attestation and complete match-token validation. Verified connection/reconnect MACs are not a claim of the entire Windows Hello security model.
 
 Private sensor records, SIDs, enrollment/account identifiers, vendor binaries and working transport constants remain excluded from the public repository.
+
+
+## 8. Standby Follow-Up: Initial Timeout and Leaked Open Handle
+
+A later real standby with the KDE dialog open exposed an initial `e1/04` timeout. The old failed-open path reported the error without releasing the claimed interface/GUsb handle, causing subsequent claims to fail with “Device 27c6:6f94 is already open”. This was a resource-lifecycle failure, not evidence of lost templates.
+
+Failed initialization and failed claims now fully unwind USB ownership. Only the initial idempotent setup request is retried for a timeout, at most twice after the first attempt. There are no resets, MCU writes or capture/commit retries. Five USB-type FpDevice simulations cover bounded setup retries and same-object reopening after timeout, disconnect, malformed list and claim failure. A sixth simulation covers the real receive-callback pause path and full session refresh during an active identify across suspend/resume. The total native API simulation count is now 19.
+
+In the repeated hardware test with KDE open, the first setup request timed out again. The added retry succeeded, initialization completed, and standard matching and close succeeded under the same daemon process. A separate `fprintd-verify -f right-thumb` then returned `verify-match`; all three registrations remained listed. This validates the actual recovery path for the reproduced short sleep cycle. The original failing sleep lasted about 38 minutes; a similarly long corrected run has not yet been observed.
+
+Detailed chronology, exact retry boundaries and validation scope: [Standby Recovery](STANDBY_RECOVERY.md).
